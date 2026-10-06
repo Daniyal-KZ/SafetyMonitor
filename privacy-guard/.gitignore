@@ -1,0 +1,13 @@
+node_modules
+.nuxt
+.output
+.data
+.sites-runtime
+*.log
+.DS_Store
+data/
+.test-data/
+test-results/
+playwright-report/
+.artifacts/
+.npm-cache/
