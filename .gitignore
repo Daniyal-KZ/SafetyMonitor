@@ -1,4 +1,5 @@
 .venv/
+.venv-local/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -6,3 +7,9 @@ __pycache__/
 .artifacts/
 data/config.json
 data/*.tmp
+data/train/
+data/valid/
+data/test/
+data/yolo/
+runs/
+*.pt
