@@ -1,0 +1,16 @@
+{
+  "sha256": "c4b8fc9ec86860c24b05914dd9005d3b099c7c2646bd664f81137745d8bb7c43",
+  "source": "Checkpoint args.class_names; zero-based RF-DETR training export",
+  "labels": {
+    "0": "GLOVES",
+    "1": "HELMET",
+    "2": "PERSON",
+    "3": "PPE GLASSES",
+    "4": "VEST",
+    "5": "NO HELMET",
+    "6": "NO PPE GLASSES",
+    "7": "NO GLOVES",
+    "8": "NO VEST",
+    "9": null
+  }
+}

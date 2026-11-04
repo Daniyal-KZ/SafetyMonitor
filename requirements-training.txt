@@ -1,3 +1,3 @@
 # Отдельные зависимости для models.py; интерфейс использует requirements.txt.
 # YOLO26 поддерживается начиная с Ultralytics 8.4.0.
-ultralytics>=8.4.0,<9.0
+ultralytics==8.4.175

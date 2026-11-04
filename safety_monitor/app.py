@@ -79,15 +79,19 @@ class App(ctk.CTk):
         view_menu = tk.Menu(menu, tearoff=False)
         view_menu.add_command(label="Наблюдение", command=lambda: self.screen.tabs.set("Наблюдение"))
         view_menu.add_command(label="Список камер", command=lambda: self.screen.tabs.set("Камеры"))
+        view_menu.add_command(label="Журнал событий", command=lambda: self.screen.tabs.set("Журнал событий"))
         menu.add_cascade(label="Вид", menu=view_menu)
         settings_menu = tk.Menu(menu, tearoff=False)
         settings_menu.add_command(label="Настройки приложения…", command=self.screen.application_settings)
+        settings_menu.add_command(label="Выбрать модель…", command=self.screen.select_model)
         settings_menu.add_command(label="Модули выбранной камеры…", command=self.screen.camera_settings)
         menu.add_cascade(label="Настройки", menu=settings_menu)
         help_menu = tk.Menu(menu, tearoff=False)
         help_menu.add_command(label="О программе", command=lambda: messagebox.showinfo(
             "Safety Monitor", "Safety Monitor\n\nРабочие зоны и видеопотоки IP-камер.\n"
-            "Параметры модулей СИЗ сохраняются локально.\nМодель анализа ещё не подключена.", parent=self))
+            "Пять классов: PERSON, HELMET, VEST, GLOVES, PPE GLASSES.\n"
+            "Журнал событий с фото, временем и камерой.\n"
+            "События отсутствия СИЗ требуют проверки оператором.", parent=self))
         menu.add_cascade(label="Справка", menu=help_menu)
         self.configure(menu=menu)
 

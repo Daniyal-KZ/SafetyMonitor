@@ -1,0 +1,4 @@
+-r requirements.txt
+rfdetr[train]==1.11.2
+opencv-python==4.14.0.94
+opencv-python-headless==4.14.0.94

@@ -102,23 +102,46 @@ def main() -> None:
             dashboard.camera_settings()
             pump()
             settings = dashboard._dialogs[-1]
-            assert len(settings.module_vars) == 7
+            assert len(settings.module_vars) == 4
             settings.module_vars["helmet"].set(True)
             settings.module_vars["gloves"].set(True)
-            settings.module_vars["boots"].set(True)
+            settings.module_vars["glasses"].set(True)
             capture("classic-modules.png", settings)
             settings.submit()
             pump()
             loaded = WorkspaceStore(config)
             assert loaded.workspaces[0].cameras[0].rules.helmet
             assert loaded.workspaces[0].cameras[0].rules.gloves
-            assert loaded.workspaces[0].cameras[0].rules.boots
+            assert loaded.workspaces[0].cameras[0].rules.glasses
             assert not loaded.workspaces[0].cameras[1].rules.helmet
             capture("classic-main.png")
             dashboard.tabs.set("Камеры")
             pump()
             assert dashboard.camera_table.selection() == (first.id,)
             capture("classic-cameras.png")
+            # Evidence lives in this test's temporary directory, never production data.
+            dashboard.events.add(occurred_at="2026-10-24T14:15:16+05:00", camera_id=first.id,
+                                 camera_name=first.name, workspace=workspace.name, track_id=7,
+                                 missing=("helmet", "gloves"), frame=np.full((360, 640, 3), 80, dtype=np.uint8),
+                                 details={"status": "requires_review", "test_fixture": True})
+            dashboard.tabs.set("Журнал событий")
+            dashboard.journal.refresh()
+            pump()
+            assert len(dashboard.journal.table.get_children()) == 1
+            assert tile.cap.isOpened(), "Opening the journal stopped monitoring"
+            capture("journal.png")
+            event_id = dashboard.journal.table.get_children()[0]
+            dashboard.journal.table.selection_set(event_id)
+            dashboard.journal.preview()
+            pump()
+            assert dashboard.journal._previews[-1].winfo_exists()
+            dashboard.journal._previews[-1].destroy()
+            dashboard.journal.search.insert(0, "несуществующая камера")
+            dashboard.journal.apply_filter()
+            assert not dashboard.journal.table.get_children()
+            dashboard.journal.search.delete(0, "end")
+            dashboard.journal.apply_filter()
+            assert len(dashboard.journal.table.get_children()) == 1
             dashboard.tabs.set("Наблюдение")
 
             dashboard.application_settings()

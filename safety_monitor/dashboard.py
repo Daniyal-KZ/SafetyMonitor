@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 import customtkinter as ctk
 
 from .dialogs import ApplicationSettingsDialog, CameraDialog, CameraSettingsDialog
-from .models import Camera, MODULE_LABELS, Workspace, WorkspaceStore, source_label
+from .models import Camera, Workspace, WorkspaceStore, source_label
 from .theme import BACKGROUND, BLUE, BORDER, MUTED, SURFACE, TEXT, font
 from .video import VideoPlayerFrame
 from .workspaces import WorkspaceManager
+from .detection import AnalysisService, ROOT
+from .events import EventStore
+from .journal import EventJournal
+from .classes import RULE_LABELS
+from .inference import MODEL_VERSIONS, model_name
 
 
 class MainDashboard(ctk.CTkFrame):
@@ -21,6 +27,9 @@ class MainDashboard(ctk.CTkFrame):
     def __init__(self, master: ctk.CTk, store: WorkspaceStore) -> None:
         super().__init__(master, fg_color=BACKGROUND, corner_radius=0)
         self.store = store
+        self.events = EventStore((store.path.parent if store.path else ROOT / "data") / "events")
+        self.analysis = AnalysisService(self.events, ROOT / store.settings["model_path"])
+        self._analysis_after = None
         self.workspace: Workspace | None = None
         self.selected_camera_id: str | None = None
         self.tiles: dict[str, VideoPlayerFrame] = {}
@@ -59,7 +68,7 @@ class MainDashboard(ctk.CTkFrame):
                                    segmented_button_unselected_hover_color=BORDER,
                                    text_color=TEXT, anchor="w")
         self.tabs.grid(row=1, column=0, sticky="nsew")
-        for name in ("Наблюдение", "Камеры"):
+        for name in ("Наблюдение", "Камеры", "Журнал событий"):
             tab = self.tabs.add(name)
             tab.grid_columnconfigure(0, weight=1)
             tab.grid_rowconfigure(0, weight=1)
@@ -75,6 +84,8 @@ class MainDashboard(ctk.CTkFrame):
                                          self.workspace_manager.create_workspace, width=230)
         self.empty_button.grid(row=1, column=0, pady=(0, 80))
         self._build_camera_table()
+        self.journal = EventJournal(self.tabs.tab("Журнал событий"), self.events, self.analysis, self.select_model)
+        self.journal.grid(row=0, column=0, sticky="nsew")
 
         paging = ctk.CTkFrame(self.content, fg_color="transparent", corner_radius=0)
         paging.grid(row=2, column=0, sticky="ew", pady=(5, 0))
@@ -92,8 +103,10 @@ class MainDashboard(ctk.CTkFrame):
         self.status_label = ctk.CTkLabel(status, text="Готово", height=24, text_color=MUTED,
                                         font=font(11), anchor="w")
         self.status_label.grid(row=0, column=0, sticky="ew", padx=10)
-        ctk.CTkLabel(status, text="Анализ СИЗ: модель не подключена", text_color=MUTED,
-                     font=font(11), height=24).grid(row=0, column=1, padx=10)
+        self.analysis_label = ctk.CTkLabel(status, text=self.analysis.status, text_color=MUTED,
+                                         font=font(11), height=24)
+        self.analysis_label.grid(row=0, column=1, padx=10)
+        self._poll_analysis()
         self.content.bind("<Configure>", self._on_resize)
         self.apply_settings()
         if self.store.workspaces:
@@ -108,6 +121,39 @@ class MainDashboard(ctk.CTkFrame):
         return ctk.CTkButton(master, text=text, command=command, width=width, height=30,
                              corner_radius=3, fg_color=SURFACE, text_color=TEXT,
                              border_color=BORDER, border_width=1, hover_color=BORDER, font=font(12))
+
+    def _poll_analysis(self) -> None:
+        if not self._closed:
+            self.analysis_label.configure(text=self.analysis.status)
+            self._analysis_after = self.after(1000, self._poll_analysis)
+
+    def select_model(self) -> None:
+        """Choose a saved model version and reload it on the analysis worker."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Выбор модели")
+        dialog.geometry("340x180")
+        dialog.transient(self.winfo_toplevel())
+        ctk.CTkLabel(dialog, text="Модель для всех камер").pack(pady=(16, 8))
+        choice = ctk.CTkOptionMenu(dialog, values=list(MODEL_VERSIONS))
+        current = model_name(self.analysis.model_path)
+        choice.set(current if current in MODEL_VERSIONS else "model-v1")
+        choice.pack(pady=8)
+
+        def apply():
+            relative = MODEL_VERSIONS[choice.get()]
+            if not (ROOT / relative).is_file():
+                messagebox.showerror("Модель", "Файл выбранной модели не найден.", parent=dialog)
+                return
+            try:
+                self.store.update_settings(model_path=relative)
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("Модель", str(exc), parent=dialog)
+                return
+            self.analysis.reload(ROOT / relative)
+            dialog.destroy()
+
+        ctk.CTkButton(dialog, text="Подключить", command=apply).pack(pady=12)
+        dialog.grab_set()
 
     def _build_toolbar(self) -> None:
         toolbar = ctk.CTkFrame(self, fg_color=BACKGROUND, corner_radius=0)
@@ -207,6 +253,7 @@ class MainDashboard(ctk.CTkFrame):
             if camera.id in self.tiles:
                 continue
             tile = VideoPlayerFrame(self.wall, reconnect_seconds=float(self.store.settings["reconnect_seconds"]),
+                                    analysis=self.analysis,
                                     on_status=lambda state, detail, camera_id=camera.id:
                                     self._on_camera_status(camera_id, state, detail))
             tile.configure(height=280, width=290)
@@ -262,7 +309,7 @@ class MainDashboard(ctk.CTkFrame):
                     detail = self._states.get(camera.id, ("disconnected", "Не подключена"))[1]
                     if not camera.enabled:
                         detail = "Отключена в настройках"
-                    modules = ", ".join(label for key, label in MODULE_LABELS.items() if getattr(camera.rules, key))
+                    modules = ", ".join(label for key, label in RULE_LABELS.items() if getattr(camera.rules, key))
                     self.camera_table.insert("", "end", iid=camera.id,
                                              values=(camera.name, detail, source_label(camera.source), modules or "Не выбраны"))
                 if self.selected_camera_id and self.camera_table.exists(self.selected_camera_id):
@@ -314,7 +361,7 @@ class MainDashboard(ctk.CTkFrame):
     def _update_paging(self) -> None:
         count = len(self.workspace.cameras) if self.workspace else 0
         pages = max(1, (count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
-        self.page_label.configure(text=f"Страница {self._page + 1} из {pages}" if count else "")
+        self.page_label.configure(text=f"Страница {self._page + 1} из {pages} · Анализ подключённых камер этой страницы" if count else "")
         self.previous_button.configure(state="normal" if self._page > 0 else "disabled")
         self.next_button.configure(state="normal" if self._page + 1 < pages else "disabled")
 
@@ -374,6 +421,7 @@ class MainDashboard(ctk.CTkFrame):
 
         def save() -> None:
             self.store.save()
+            self.analysis.reset_camera(camera.id)
             self._refresh_table()
 
         self._remember_dialog(CameraSettingsDialog(self, camera, save))
@@ -452,6 +500,9 @@ class MainDashboard(ctk.CTkFrame):
         if self._closed:
             return
         self._closed = True
+        if self._analysis_after is not None:
+            self.after_cancel(self._analysis_after)
+        self.journal.close()
         self.workspace_manager.close()
         for dialog in self._dialogs:
             if dialog.winfo_exists():
@@ -462,6 +513,7 @@ class MainDashboard(ctk.CTkFrame):
         deadline = time.monotonic() + 6.0
         for tile in tiles:
             tile.wait_closed(timeout=max(0.0, deadline - time.monotonic()))
+        self.analysis.close()
 
     def destroy(self) -> None:
         self.close()

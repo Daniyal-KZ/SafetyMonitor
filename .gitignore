@@ -13,3 +13,15 @@ data/test/
 data/yolo/
 runs/
 *.pt
+data/construction-ppe/
+data/construction-ppe.zip
+data/*.part
+data/ppe5/
+data/rfdetr_ppe8/
+data/ppe_clean_review/
+data/ppe_annotation_batch/
+data/ppe_all_classes_draft/
+data/ppe_full_annotation_review/
+weights/training.lock
+data/events/
+data/config.*.json

@@ -1,4 +1,4 @@
-"""Real OpenCV capture and Tk rendering, without generated video or detections.
+"""OpenCV capture, Tk rendering and bounded submission to the PPE analyzer.
 
 The worker owns VideoCapture. Tk consumes only the latest frame. RTSP timeout
 options must be passed to open(), rather than set() after creating a capture.
@@ -19,6 +19,8 @@ import numpy as np
 from PIL import Image
 
 from .models import Camera
+from .detection import AnalysisService, EVENT_TIMEZONE, draw_detections
+from datetime import datetime
 
 
 _VIDEO_BACKGROUND = "#17191C"
@@ -40,6 +42,8 @@ class _FramePacket:
     frame: np.ndarray | None
     state: str
     status: str
+    captured: float
+    occurred_at: str
 
 
 def _is_rtsp(source: int | str | None) -> bool:
@@ -131,7 +135,8 @@ class _CaptureWorker:
                 return
             with self._packet_lock:
                 self._sequence += 1
-                self._packet = _FramePacket(generation, self._sequence, frame, state, status)
+                self._packet = _FramePacket(generation, self._sequence, frame, state, status,
+                                            time.monotonic(), datetime.now(EVENT_TIMEZONE).isoformat(timespec="milliseconds"))
 
     def _run(self) -> None:
         previous_generation = 0
@@ -261,7 +266,7 @@ class VideoPlayerFrame(ctk.CTkFrame):
 
     def __init__(
         self, master, on_status: Callable[[str, str], None] | None = None,
-        reconnect_seconds: float = 5.0, **kwargs
+        reconnect_seconds: float = 5.0, analysis: AnalysisService | None = None, **kwargs
     ) -> None:
         kwargs.setdefault("fg_color", _CARD_COLOR)
         kwargs.setdefault("corner_radius", 0)
@@ -272,6 +277,8 @@ class VideoPlayerFrame(ctk.CTkFrame):
         self.workspace_name = ""
         self.state = "disconnected"
         self.on_status = on_status
+        self.analysis = analysis
+        self._last_analysis = 0.0
         self._worker = _CaptureWorker(reconnect_seconds=reconnect_seconds)
         self._generation = 0
         self._closed = False
@@ -316,6 +323,12 @@ class VideoPlayerFrame(ctk.CTkFrame):
             font=ctk.CTkFont(family="Segoe UI", size=11),
         )
         self.source_label.grid(row=2, column=0, padx=10, pady=3, sticky="ew")
+        self.analysis_label = ctk.CTkLabel(
+            self, text="Детекция: ожидание видео", anchor="w", height=22,
+            text_color=_MUTED_COLOR, font=ctk.CTkFont(family="Segoe UI", size=11),
+        )
+        self.analysis_label.grid(row=3, column=0, padx=10, pady=(0, 3), sticky="ew")
+        self._analysis_caption = "Детекция: ожидание видео"
         self._schedule_tick()
 
     @property
@@ -344,6 +357,9 @@ class VideoPlayerFrame(ctk.CTkFrame):
             self.disconnect()
             self._set_status("disconnected", "Камера отключена в настройках")
             return
+        if self.analysis:
+            self.analysis.reset_camera(self.camera.id)
+        self._last_analysis = 0.0
         self._generation = self._worker.request(
             self.camera.source, getattr(self.camera, "transport", "tcp")
         )
@@ -354,6 +370,8 @@ class VideoPlayerFrame(ctk.CTkFrame):
     def disconnect(self) -> None:
         if self._closed:
             return
+        if self.analysis and self.camera:
+            self.analysis.reset_camera(self.camera.id)
         self._generation = self._worker.request(None)
         self._last_packet_sequence = -1
         self._clear_frame("Нет подключения")
@@ -365,6 +383,8 @@ class VideoPlayerFrame(ctk.CTkFrame):
                 self._worker.wait_closed()
             return
         self._closed = True
+        if self.analysis and self.camera:
+            self.analysis.reset_camera(self.camera.id)
         if self._after_id is not None:
             try:
                 self.after_cancel(self._after_id)
@@ -396,6 +416,8 @@ class VideoPlayerFrame(ctk.CTkFrame):
                 self._last_packet_sequence = packet.sequence
                 self._set_status(packet.state, packet.status)
                 if packet.frame is None:
+                    if self.analysis and self.camera:
+                        self.analysis.reset_camera(self.camera.id)
                     self._clear_frame(
                         "Нет подключения" if packet.state == "disconnected" else
                         "Нет видеосигнала" if packet.state in {"error", "reconnecting"} else
@@ -403,6 +425,9 @@ class VideoPlayerFrame(ctk.CTkFrame):
                     )
                 else:
                     self._cached_frame = packet.frame
+                    if self.analysis and self.camera and packet.captured-self._last_analysis >= 0.25:
+                        self._last_analysis = packet.captured
+                        self.analysis.submit(self.camera, self.workspace_name, packet.frame, packet.captured, packet.occurred_at)
             if self._cached_frame is not None:
                 self._render_current_frame()
         finally:
@@ -437,11 +462,29 @@ class VideoPlayerFrame(ctk.CTkFrame):
         # on CTk versions that cannot clear a label with image=None.
         self.video_label.configure(image=self._placeholder, text=text)
         self._image = self._placeholder
+        self._analysis_caption = "Детекция: ожидание видео"
+        self.analysis_label.configure(text=self._analysis_caption)
 
     def _render_current_frame(self) -> None:
         frame = self._cached_frame
         if frame is None:
             return
+        result = self.analysis.display_result(self.camera.id) if self.analysis and self.camera else None
+        detections = result.detections if result else ()
+        if result is not None:
+            names = ", ".join(sorted({item.name for item in detections}))
+            caption = f"Объектов: {len(detections)}" + (f" · {names}" if names else " · ничего не обнаружено")
+            if not any(getattr(self.camera.rules, rule) for rule in ("helmet", "vest", "gloves", "glasses")):
+                caption += " · контроль СИЗ выключен"
+        else:
+            caption = self.analysis.status if self.analysis else "Детекция недоступна"
+        if caption != self._analysis_caption:
+            self._analysis_caption = caption
+            self.analysis_label.configure(text=caption)
+        # Render boxes on the exact frame that produced them, not on a newer
+        # camera frame where the person may already have moved.
+        if result is not None:
+            frame = result.frame
         scaling = self._get_widget_scaling()
         available_width = max(1, int(self.video_area.winfo_width() / scaling) - 4)
         available_height = max(1, int(self.video_area.winfo_height() / scaling) - 4)
@@ -451,10 +494,13 @@ class VideoPlayerFrame(ctk.CTkFrame):
         factor = min(available_width / frame_width, available_height / frame_height)
         width = max(1, int(frame_width * factor))
         height = max(1, int(frame_height * factor))
-        render_key = self._last_packet_sequence, width, height, scaling
+        frame_key = result.captured if result else self._last_packet_sequence
+        render_key = frame_key, width, height, scaling, tuple(detections)
         if render_key == self._last_render_key:
             return
         self._last_render_key = render_key
+        if detections:
+            frame = draw_detections(frame, detections)
         if frame.ndim == 2:
             pil_image = Image.fromarray(frame).convert("RGB")
         elif frame.shape[2] == 4:

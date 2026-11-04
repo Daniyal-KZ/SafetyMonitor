@@ -11,6 +11,8 @@ from typing import Callable, Iterable
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from .inference import MODEL_RELATIVE_PATH, MODEL_VERSIONS
+
 
 MODULE_LABELS: dict[str, str] = {
     "helmet": "Каска",
@@ -27,6 +29,7 @@ DEFAULT_SETTINGS: dict[str, str | int | bool] = {
     "view_columns": 2,
     "auto_connect": True,
     "reconnect_seconds": 5,
+    "model_path": MODEL_RELATIVE_PATH,
 }
 
 
@@ -195,6 +198,11 @@ class WorkspaceStore:
         seconds = result["reconnect_seconds"]
         if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 300:
             raise ValueError("Интервал переподключения должен быть от 1 до 300 секунд.")
+        if not isinstance(result["model_path"], str) or not result["model_path"].strip():
+            raise ValueError("Укажите путь к весам модели.")
+        # Preserve supported versions while retaining legacy config compatibility.
+        if result["model_path"] not in MODEL_VERSIONS.values():
+            result["model_path"] = MODEL_RELATIVE_PATH
         return result
 
     @classmethod

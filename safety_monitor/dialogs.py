@@ -7,7 +7,8 @@ from typing import Callable
 
 import customtkinter as ctk
 
-from .models import MODULE_LABELS, Camera, WorkspaceStore, validate_source
+from .models import Camera, WorkspaceStore, validate_source
+from .classes import RULE_LABELS
 from .theme import (
     BACKGROUND, BLUE, BLUE_HOVER, BORDER, BUTTON, MUTED,
     RED, SURFACE, SURFACE_ALT, TEXT, font,
@@ -248,7 +249,7 @@ class CameraSettingsDialog(CreationDialog):
 
     def __init__(self, master: ctk.CTkBaseClass, camera: Camera,
                  on_save: Callable[[], None]) -> None:
-        super().__init__(master, f"Настройки камеры — {camera.name}", "570x530")
+        super().__init__(master, f"Настройки камеры — {camera.name}", "570x420")
         self.camera = camera
         self.on_save = on_save
         self.module_vars: dict[str, ctk.BooleanVar] = {}
@@ -260,16 +261,18 @@ class CameraSettingsDialog(CreationDialog):
                              border_color=BORDER, border_width=1)
         group.grid(row=1, column=0, columnspan=2, sticky="ew")
         group.grid_columnconfigure(0, weight=1)
-        for index, (key, label) in enumerate(MODULE_LABELS.items()):
+        for index, (key, label) in enumerate(RULE_LABELS.items()):
             self.module_vars[key] = ctk.BooleanVar(value=getattr(camera.rules, key))
             self._settings_row(group, index * 2, label, self.module_vars[key])
-            if index < len(MODULE_LABELS) - 1:
+            if index < len(RULE_LABELS) - 1:
                 ctk.CTkFrame(group, height=1, corner_radius=0, fg_color=BORDER).grid(
                     row=index * 2 + 1, column=0, columnspan=2, padx=12, sticky="ew")
         ctk.CTkLabel(
             self.body,
-            text="Модель анализа не подключена. Выбранные модули сохраняются\n"
-                 "в настройках камеры для последующего подключения модели.",
+            text="Отметьте обязательные СИЗ для этой камеры.\n"
+                 "Нарушение в течение 30 секунд сохраняется в журнал со снимком.\n"
+                 "Прямые метки NO учитываются и без полного силуэта человека.\n"
+                 "Если все СИЗ выключены, события этой камеры не записываются.",
             font=font(12), text_color=MUTED, anchor="w", justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
 
