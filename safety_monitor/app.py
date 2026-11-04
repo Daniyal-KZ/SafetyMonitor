@@ -6,10 +6,12 @@ from tkinter import messagebox, ttk
 import customtkinter as ctk
 
 from .account_ui import LoginFrame, error_text
+from .background import ViewJobs
 from .database import Database
 from .dashboard import MainDashboard
 from .events import EventRecorder
 from .journal_ui import JournalFrame
+from .personnel_ui import WorkersFrame, InspectorsFrame
 from .models import DEFAULT_SETTINGS
 from .theme import BACKGROUND, BORDER, MUTED, SURFACE, TEXT
 
@@ -27,6 +29,9 @@ class App(ctk.CTk):
         self._sections = {}
         self._closed = False
         self._journal_after = None
+        self._access_after = None
+        self._access_jobs = None
+        self._access_suspended = False
         self.title('Safety Monitor — вход')
         scale = self._get_window_scaling()
         width = max(900, min(1280, int(self.winfo_screenwidth() / scale) - 80))
@@ -52,6 +57,7 @@ class App(ctk.CTk):
 
     def start_session(self, session):
         self.token, self.store = session
+        self._access_suspended = False
         self.login_frame.destroy()
         user = self.database.user(self.token)
         role = 'Администратор' if user.is_admin else 'Инспектор'
@@ -59,13 +65,75 @@ class App(ctk.CTk):
         self.recorder = EventRecorder(self.database, self.token)
         self.screen = MainDashboard(self, self.store)
         self.screen.grid(row=0, column=0, sticky='nsew')
-        for name in ('Журнал',):
+        for name in ('Журнал', 'Рабочие', *(('Инспекторы',) if user.is_admin else ())):
             tab = self.screen.tabs.add(name)
             tab.grid_columnconfigure(0, weight=1)
             tab.grid_rowconfigure(0, weight=1)
         self.screen.tabs.configure(command=self._section_changed)
         self._build_menu()
         self._poll_journal()
+        self._access_jobs = ViewJobs(self.screen)
+        if not self.store.can_manage:
+            self._access_after = self.after(3000, self.refresh_access)
+
+    def refresh_access(self):
+        """Refresh permissions without exposing old jobs after logout or a save."""
+        if self._access_after is not None:
+            self.after_cancel(self._access_after)
+            self._access_after = None
+        if self.screen is None or self._closed or self._access_jobs is None:
+            return
+        if not self.store.can_manage:
+            self._access_after = self.after(3000, self.refresh_access)
+        if self._access_jobs.running('access') or getattr(self.screen, '_busy', False):
+            if self.store.can_manage:
+                self._access_after = self.after(500, self.refresh_access)
+            return
+        token, original, revision = self.token, self.store, self.store.revision
+        settings = dict(original.settings)
+        draft = original.fork()
+
+        def work():
+            draft.reload()
+            return draft
+
+        def refreshed(updated):
+            if self.token != token or self.store is not original or self.screen is None:
+                return
+            if (getattr(self.screen, '_busy', False) or self.store.revision != revision
+                    or self.store.settings != settings):
+                if self.store.can_manage:
+                    if self._access_after is not None:
+                        self.after_cancel(self._access_after)
+                    self._access_after = self.after(500, self.refresh_access)
+                return
+            changed = (self._access_suspended or updated.revision != original.revision or updated.workspaces != original.workspaces
+                       or updated.settings != original.settings)
+            self._access_suspended = False
+            if changed:
+                self.screen.adopt_refreshed_store(updated)
+                for section in self._sections.values():
+                    scope = getattr(section, '_workspace_id', None)
+                    if isinstance(section, WorkersFrame) and scope and not any(
+                            item.id == scope for item in self.store.workspaces):
+                        section.invalidate_access(refresh=False)
+                        selected = self.screen.workspace
+                        section.set_workspace(selected.id if selected else None,
+                                              selected.name if selected else None)
+                    else:
+                        section.invalidate_access()
+
+        def failed(message):
+            if self.token != token or self.screen is None:
+                return
+            if not self.store.can_manage:
+                self._access_suspended = True
+                self.screen.suspend_access()
+                for section in self._sections.values():
+                    section.invalidate_access(refresh=False)
+            self.screen.status_label.configure(text=message)
+
+        self._access_jobs.submit('access', work, refreshed, failed, replace=False)
 
     def _poll_journal(self):
         if self.screen is None or self._closed:
@@ -86,13 +154,18 @@ class App(ctk.CTk):
 
     def _section_changed(self):
         name = self.screen.tabs.get()
-        sections = {'Журнал': JournalFrame}
+        sections = {'Журнал': JournalFrame, 'Рабочие': WorkersFrame, 'Инспекторы': InspectorsFrame}
         if name in sections and name not in self._sections:
-            frame = sections[name](self.screen.tabs.tab(name), self.database, self.token)
+            options = {'on_changed': self.refresh_access} if name != 'Журнал' else {}
+            frame = sections[name](self.screen.tabs.tab(name), self.database, self.token, **options)
             frame.grid(row=0, column=0, sticky='nsew')
             self._sections[name] = frame
         elif name in sections:
             self._sections[name].refresh(reset=False)
+        if name == 'Рабочие':
+            workspace = self.screen.workspace
+            self._sections[name].set_workspace(workspace.id if workspace else None,
+                                               workspace.name if workspace else None)
         if name in {'Наблюдение', 'Камеры'}:
             self.screen.paging.grid()
             if name == 'Камеры':
@@ -101,6 +174,12 @@ class App(ctk.CTk):
             self.screen.paging.grid_remove()
 
     def _end_session(self):
+        if self._access_after is not None:
+            self.after_cancel(self._access_after)
+            self._access_after = None
+        if self._access_jobs is not None:
+            self._access_jobs.close()
+            self._access_jobs = None
         if self._journal_after:
             self.after_cancel(self._journal_after)
             self._journal_after = None
@@ -141,7 +220,7 @@ class App(ctk.CTk):
         file_menu.add_command(label='Создать объект / рабочую зону…', accelerator='Ctrl+N',
                               command=self.screen.workspace_manager.create_workspace, state=admin_state)
         file_menu.add_command(label='Открыть рабочую зону…', accelerator='Ctrl+O', command=self.screen.workspace_manager.open_workspace)
-        file_menu.add_command(label='Переименовать рабочую зону…', command=self.screen.workspace_manager.rename_workspace, state=admin_state)
+        file_menu.add_command(label='Участники и настройки рабочей зоны…', command=self.screen.workspace_manager.rename_workspace, state=admin_state)
         file_menu.add_command(label='Удалить рабочую зону…', command=self.screen.remove_workspace, state=admin_state)
         file_menu.add_separator()
         file_menu.add_command(label='Выйти из аккаунта', command=self.logout)
@@ -159,9 +238,12 @@ class App(ctk.CTk):
         view.add_command(label='Наблюдение', command=lambda: self.show_section('Наблюдение'))
         view.add_command(label='Список камер', command=lambda: self.show_section('Камеры'))
         view.add_command(label='Журнал и библиотека кадров', command=self.open_journal)
+        view.add_command(label='Рабочие', command=lambda: self.show_section('Рабочие'))
+        if self.store.can_manage:
+            view.add_command(label='Инспекторы', command=lambda: self.show_section('Инспекторы'))
         menu.add_cascade(label='Вид', menu=view)
         settings = tk.Menu(menu, tearoff=False)
-        settings.add_command(label='Настройки приложения…', command=self.screen.application_settings, state=admin_state)
+        settings.add_command(label='Настройки приложения…', command=self.screen.application_settings)
         menu.add_cascade(label='Настройки', menu=settings)
         self.configure(menu=menu)
 

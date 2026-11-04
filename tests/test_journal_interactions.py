@@ -432,6 +432,62 @@ class JournalInteractionTests(unittest.TestCase):
                 gate.release.set()
                 self.pump(lambda: not journal._jobs.running('export'))
 
+    def test_cached_snapshot_selection_rechecks_current_access(self):
+        journal = self.open_journal(2)
+        self.select(1)
+        self.pump(lambda: journal._snapshot == self.database.snapshot(1))
+        self.assertIn(1, journal._cache)
+        self.select(2)
+        self.pump(lambda: journal._snapshot == self.database.snapshot(2))
+        # The table has not refreshed yet, but the backend no longer grants access.
+        self.database.rows.pop(1)
+        self.select(1)
+        self.pump(lambda: not journal._jobs.running('snapshot'))
+        self.assertIsNone(journal._snapshot)
+        self.assertEqual(journal.export_button.cget('state'), 'disabled')
+
+    def test_snapshot_export_rechecks_access_and_preserves_existing_file(self):
+        journal = self.open_journal(1)
+        self.select(1)
+        self.pump(lambda: journal._snapshot is not None)
+        self.database.rows.clear()
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / 'existing.jpg'
+            destination.write_bytes(b'keep existing file')
+            with patch('safety_monitor.journal_ui.filedialog.asksaveasfilename',
+                       return_value=str(destination)):
+                journal.export()
+            self.pump(lambda: not journal._jobs.running('export'))
+            self.assertEqual(destination.read_bytes(), b'keep existing file')
+
+    def test_access_invalidation_clears_cache_and_discards_pending_responses(self):
+        journal = self.open_journal(2)
+        self.select(2)
+        self.pump(lambda: journal._snapshot is not None)
+        journal.note.insert(0, 'Private draft')
+        list_gate = self.database.list_gates[None] = _Gate()
+        journal.refresh(reset=False)
+        self.pump(list_gate.started.is_set)
+        stale_list = journal._jobs._slots['list'][0]
+        snapshot_gate = self.database.snapshot_gates[1] = _Gate()
+        self.select(1)
+        self.pump(snapshot_gate.started.is_set)
+        stale_snapshot = journal._jobs._slots['snapshot'][0]
+        self.database.rows.clear()
+        journal.invalidate_access()
+        self.assertEqual(journal._rows, {})
+        self.assertEqual(journal._cache, {})
+        self.assertEqual(journal._note_drafts, {})
+        self.assertIsNone(journal._snapshot)
+        self.assertIsNone(journal._selected)
+        self.assertEqual(journal.table.get_children(), ())
+        list_gate.release.set()
+        snapshot_gate.release.set()
+        self.pump(lambda: stale_list.done() and stale_snapshot.done() and not journal._loading)
+        self.assertEqual(journal._rows, {})
+        self.assertEqual(journal._cache, {})
+        self.assertIsNone(journal._snapshot)
+
 
 if __name__ == '__main__':
     unittest.main()

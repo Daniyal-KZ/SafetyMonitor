@@ -177,7 +177,8 @@ class MainDashboard(ctk.CTkFrame, AsyncMixin):
     def _show_empty(self) -> None:
         self.empty_frame.grid(row=0, column=0, columnspan=max(1, self._layout_columns), sticky="ew")
         if self.workspace is None:
-            self.empty_label.configure(text="Создайте или откройте рабочую зону.")
+            self.empty_label.configure(text="Создайте или откройте рабочую зону." if self.can_manage else
+                                       "Нет назначенных рабочих зон. Доступ назначает администратор.")
             self.empty_button.configure(text="Создать рабочую зону…", command=self.workspace_manager.create_workspace)
         else:
             self.empty_label.configure(text="В этой рабочей зоне пока нет камер.")
@@ -436,23 +437,50 @@ class MainDashboard(ctk.CTkFrame, AsyncMixin):
                                                    model_path=self.store.settings["model_path"]))
 
     def application_settings(self) -> None:
-        if not self.can_manage:
-            return
         self._remember_dialog(ApplicationSettingsDialog(self, self.store, self.apply_settings))
+
+    def adopt_refreshed_store(self, draft):
+        """Remove revoked cameras immediately and keep unaffected live streams."""
+        workspace_id = self.workspace.id if self.workspace else None
+        previous = {key: (tile.camera.source, tile.camera.transport, tile.camera.enabled)
+                    for key, tile in self.tiles.items()}
+        self.store.adopt(draft)
+        workspace = next((item for item in self.store.workspaces if item.id == workspace_id), None)
+        if workspace is None:
+            workspace = self.store.workspaces[0] if self.store.workspaces else None
+            self.selected_camera_id = None
+            self._page = 0
+        self.workspace = workspace
+        if workspace is not None and not any(c.id == self.selected_camera_id for c in workspace.cameras):
+            self.selected_camera_id = None
+        self.workspace_manager.selected_workspace_id = workspace.id if workspace else None
+        self.workspace_manager.selected_camera_id = self.selected_camera_id
+        self.workspace_manager.refresh()
+        self.workspace_label.configure(text=workspace.name if workspace else 'Рабочая зона не выбрана')
+        self._render_wall()
+        for key, tile in self.tiles.items():
+            tile.workspace_name = workspace.name
+            tile.name_label.configure(text=tile.camera.name)
+            camera = tile.camera
+            if key in previous and previous[key] != (camera.source, camera.transport, camera.enabled):
+                tile.set_camera(camera, workspace.name, auto_connect=tile.state != 'disconnected')
+        self.apply_settings()
+
+    def suspend_access(self):
+        self.store.workspaces = []
+        self._workspace_removed(None)
+        self.empty_label.configure(text='Нет подтверждения доступа. Проверяется подключение к базе…')
 
     def apply_settings(self) -> None:
         self.winfo_toplevel().apply_theme()
         self.columns_menu.set(str(self.store.settings["view_columns"]))
         for tile in self.tiles.values():
             tile.model_path = self.store.settings["model_path"]
+            tile._worker._retry_seconds = float(self.store.settings["reconnect_seconds"])
         if hasattr(self, "content"):
             self._on_resize()
 
     def _set_columns(self, value: str) -> None:
-        if not self.can_manage:
-            self.store.settings['view_columns'] = int(value)
-            self._on_resize()
-            return
         def failed(error):
             messagebox.showerror('Настройки', str(error), parent=self)
             self.columns_menu.set(str(self.store.settings["view_columns"]))

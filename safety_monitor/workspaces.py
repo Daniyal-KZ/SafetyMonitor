@@ -120,8 +120,9 @@ class WorkspaceManager(ctk.CTkFrame):
             return
         self.dialog = WorkspaceDialog(self, self._create)
 
-    def _create(self, name: str) -> tuple:
-        return lambda store: store.add_workspace(name), lambda workspace: self.select_workspace(workspace.id)
+    def _create(self, name: str, inspector_ids, worker_ids) -> tuple:
+        return (lambda store: store.add_workspace(name, inspector_ids, worker_ids),
+                lambda workspace: self.select_workspace(workspace.id))
 
     def rename_workspace(self) -> None:
         if not self.store.can_manage:
@@ -129,11 +130,13 @@ class WorkspaceManager(ctk.CTkFrame):
         if self.selected_workspace_id is None:
             return
         workspace = self.store.get_workspace(self.selected_workspace_id)
-        self.dialog = WorkspaceDialog(self, lambda name: self._rename(workspace.id, name),
-                                       initial_name=workspace.name, title="Переименовать рабочую зону")
+        self.dialog = WorkspaceDialog(self, lambda name, inspectors, workers:
+                                       self._rename(workspace.id, name, inspectors, workers),
+                                       initial_name=workspace.name, title="Рабочая зона: участники и доступ",
+                                       workspace=workspace)
 
-    def _rename(self, workspace_id: str, name: str) -> tuple:
-        return (lambda store: store.rename_workspace(workspace_id, name),
+    def _rename(self, workspace_id: str, name: str, inspector_ids, worker_ids) -> tuple:
+        return (lambda store: store.update_workspace(workspace_id, name, inspector_ids, worker_ids),
                 lambda _: self.select_workspace(workspace_id))
 
     def open_workspace(self) -> None:

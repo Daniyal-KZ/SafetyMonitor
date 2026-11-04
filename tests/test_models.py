@@ -38,6 +38,31 @@ class WorkspaceStoreTests(unittest.TestCase):
     def setUp(self):
         self.store = TestStore()
 
+    def test_workspace_memberships_roundtrip_and_rollback(self):
+        workspace = self.store.add_workspace('Team', inspector_ids=[3, 2], worker_ids=[1001, 1000])
+        self.assertEqual(self.store.restored().workspaces[0].inspector_ids, [2, 3])
+        self.assertEqual(self.store.restored().workspaces[0].worker_ids, [1000, 1001])
+        self.store.fail_save = True
+        with self.assertRaises(OSError):
+            self.store.update_workspace(workspace.id, 'Changed', [4], [1002])
+        self.assertEqual((workspace.name, workspace.inspector_ids, workspace.worker_ids),
+                         ('Team', [2, 3], [1000, 1001]))
+
+    def test_membership_validation_rejects_duplicate_and_wrong_ids(self):
+        for values in ([True], ['2'], [0], [2, 2], '2', [[1]]):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                self.store.add_workspace('Invalid', inspector_ids=values)
+        for values in ([999], [10000], [1000, 1000], [False], ['1000']):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                self.store.add_workspace('Invalid', worker_ids=values)
+        self.assertEqual(self.store.workspaces, [])
+
+    def test_legacy_workspace_defaults_to_no_assignments(self):
+        workspaces, _ = self.store._decode(dict(version=1, settings={},
+            workspaces=[dict(id='legacy', name='Legacy', cameras=[])]))
+        self.assertEqual(workspaces[0].inspector_ids, [])
+        self.assertEqual(workspaces[0].worker_ids, [])
+
     def test_empty_start_and_roundtrip_preserve_ids_rules_settings(self):
         self.assertEqual(self.store.workspaces, [])
         workspace = self.store.add_workspace("  Production  ")

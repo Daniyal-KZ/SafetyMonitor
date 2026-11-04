@@ -49,6 +49,11 @@ class DatabaseTests(unittest.TestCase):
         with psycopg.connect(**self.options) as conn:
             conn.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(self.schema)))
 
+    def assigned_zone(self, name='Factory'):
+        store = DatabaseWorkspaceStore(self.db, self.admin)
+        zone = store.add_workspace(name, inspector_ids=[self.db.user(self.inspector).id])
+        return store, zone
+
     def test_login_roles_logout_and_seed_idempotence(self):
         self.assertTrue(self.db.user(self.admin).is_admin)
         self.assertFalse(self.db.user(self.inspector).is_admin)
@@ -70,7 +75,7 @@ class DatabaseTests(unittest.TestCase):
             inspector_store.add_workspace('Forbidden')
         self.assertEqual(inspector_store.workspaces, [])
         admin_store = DatabaseWorkspaceStore(self.db, self.admin)
-        zone = admin_store.add_workspace('Factory')
+        zone = admin_store.add_workspace('Factory', inspector_ids=[self.db.user(self.inspector).id])
         admin_store.add_camera(zone.id, 'Camera', source=0)
         reloaded = DatabaseWorkspaceStore(self.db, self.inspector)
         self.assertEqual(reloaded.workspaces[0].cameras[0].name, 'Camera')
@@ -96,10 +101,13 @@ class DatabaseTests(unittest.TestCase):
 
     def test_events_cooldown_filters_snapshot_review_and_history(self):
         image = b'jpeg-content'
-        event = self.db.record_event(self.inspector, 'camera-1', 'Entrance', 'Factory', 2, image)
+        store, zone = self.assigned_zone()
+        entrance = store.add_camera(zone.id, 'Entrance', source=0)
+        exit_camera = store.add_camera(zone.id, 'Exit', source=1)
+        event = self.db.record_event(self.inspector, entrance.id, 'Entrance', 'Factory', 2, image)
         self.assertIsNotNone(event)
-        self.assertIsNone(self.db.record_event(self.admin, 'camera-1', 'Entrance', 'Factory', 3, image))
-        second = self.db.record_event(self.admin, 'camera-2', 'Exit', 'Factory', 1, image)
+        self.assertIsNone(self.db.record_event(self.admin, entrance.id, 'Entrance', 'Factory', 3, image))
+        second = self.db.record_event(self.admin, exit_camera.id, 'Exit', 'Factory', 1, image)
         rows = self.db.list_events(self.inspector, state='new')
         self.assertEqual(len(rows), 2)
         self.assertEqual(self.db.event_snapshot(self.inspector, event), image)
@@ -122,7 +130,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(document['workspaces'], [])
         self.assertEqual(document['settings'], DEFAULT_SETTINGS)
         store = DatabaseWorkspaceStore(self.db, self.admin)
-        store.add_workspace('Saved in PostgreSQL')
+        store.add_workspace('Saved in PostgreSQL', inspector_ids=[self.db.user(self.inspector).id])
         self.db.initialize()
         reloaded = DatabaseWorkspaceStore(self.db, self.inspector)
         self.assertEqual(reloaded.workspaces[0].name, 'Saved in PostgreSQL')
@@ -132,16 +140,18 @@ class DatabaseTests(unittest.TestCase):
             WorkspaceStore()
 
     def test_recording_can_drain_after_logout_without_account_permissions(self):
+        store, zone = self.assigned_zone()
+        camera = store.add_camera(zone.id, 'Camera', source=0)
         recording = self.db.recording_token(self.inspector)
         self.db.logout(self.inspector)
         with self.assertRaises(AccessDenied):
             self.db.load_config(recording)
         with self.assertRaises(AccessDenied):
             self.db.load_config(self.inspector)
-        self.assertIsNotNone(self.db.record_event(recording, 'draining', 'Camera', 'Factory', 1, b'jpeg'))
+        self.assertIsNotNone(self.db.record_event(recording, camera.id, 'Camera', 'Factory', 1, b'jpeg'))
         self.db.release_recording_token(recording)
         with self.assertRaises(AccessDenied):
-            self.db.record_event(recording, 'after-drain', 'Camera', 'Factory', 1, b'jpeg')
+            self.db.record_event(recording, camera.id, 'Camera', 'Factory', 1, b'jpeg')
 
     def test_committed_draft_preserves_live_references(self):
         store = DatabaseWorkspaceStore(self.db, self.admin)
@@ -150,14 +160,18 @@ class DatabaseTests(unittest.TestCase):
         draft = store.fork()
         draft.update_camera(workspace.id, camera.id, name='After', description='',
                             source=0, transport='tcp', enabled=True)
+        draft.update_workspace(workspace.id, workspace.name, [self.db.user(self.inspector).id], [])
         self.assertEqual(camera.name, 'Before')
         store.adopt(draft)
         self.assertIs(store.get_workspace(workspace.id), workspace)
         self.assertIs(workspace.cameras[0], camera)
         self.assertEqual(camera.name, 'After')
+        self.assertEqual(workspace.inspector_ids, [self.db.user(self.inspector).id])
 
     def test_journal_kinds_notes_deletion_permissions_and_migration(self):
-        original = self.db.record_event(self.admin, 'camera', 'Camera', 'Factory', 1, b'jpeg')
+        store, zone = self.assigned_zone()
+        camera = store.add_camera(zone.id, 'Camera', source=0)
+        original = self.db.record_event(self.admin, camera.id, 'Camera', 'Factory', 1, b'jpeg')
         # Reproduce the original constraint to verify the upgrade path too.
         with self.db.connect() as conn:
             conn.execute('ALTER TABLE events DROP CONSTRAINT events_kind_check')
@@ -166,7 +180,7 @@ class DatabaseTests(unittest.TestCase):
         upgraded = Database(schema=self.schema, **self.options)
         upgraded.initialize()
         self.assertEqual(self.db.event_snapshot(self.inspector, original), b'jpeg')
-        other_kind = self.db.record_event(self.admin, 'camera', 'Camera', 'Factory', 1, b'jpeg', kind='no_vest')
+        other_kind = self.db.record_event(self.admin, camera.id, 'Camera', 'Factory', 1, b'jpeg', kind='no_vest')
         self.assertIsNotNone(other_kind)
         self.assertEqual(self.db.list_events(self.admin)[0]['kind'], 'no_vest')
         self.db.update_event_note(self.inspector, other_kind, 'Needs review')
@@ -180,9 +194,12 @@ class DatabaseTests(unittest.TestCase):
             self.db.event_snapshot(self.inspector, original)
 
     def test_journal_lookahead_does_not_change_export_page_size(self):
+        store, zone = self.assigned_zone()
+        camera = store.add_camera(zone.id, 'Camera', source=0)
         with self.db.connect() as conn:
-            conn.execute("INSERT INTO events(camera_id,camera_name,workspace_name,object_count,snapshot) "
-                         "SELECT 'camera','Camera','Factory',1,%s FROM generate_series(1,101)", (b'jpeg',))
+            conn.execute("INSERT INTO events(camera_id,workspace_id,camera_name,workspace_name,object_count,snapshot) "
+                         "SELECT %s,%s,'Camera','Factory',1,%s FROM generate_series(1,101)",
+                         (camera.id, zone.id, b'jpeg'))
         self.assertEqual(len(self.db.list_events(self.inspector)), 100)
         page = self.db.list_events(self.inspector, limit=101)
         self.assertEqual(len(page), 101)
@@ -190,6 +207,28 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(len(remaining), 1)
         with self.assertRaises(ValueError):
             self.db.list_events(self.inspector, limit=10000)
+
+    def test_unmapped_legacy_events_are_visible_only_to_administrator(self):
+        event_id = self.db.record_event(self.admin, 'legacy-camera', 'Old camera',
+                                        'Unknown old workplace', 1, b'historical-image')
+        self.assertEqual(self.db.list_events(self.inspector), [])
+        with self.assertRaises(AccessDenied):
+            self.db.event_snapshot(self.inspector, event_id)
+        self.assertEqual(self.db.event_snapshot(self.admin, event_id), b'historical-image')
+        self.assertEqual(len(self.db.list_events(self.admin)), 1)
+
+    def test_deleted_zone_history_is_retained_for_admin_without_regrant_by_name(self):
+        store, zone = self.assigned_zone()
+        camera = store.add_camera(zone.id, 'Camera', source=0)
+        event_id = self.db.record_event(self.inspector, camera.id, camera.name, zone.name, 1, b'history')
+        store.remove_workspace(zone.id)
+        self.assertEqual(self.db.list_events(self.inspector), [])
+        with self.assertRaises(AccessDenied):
+            self.db.event_snapshot(self.inspector, event_id)
+        self.assertEqual(self.db.event_snapshot(self.admin, event_id), b'history')
+        # Reusing a display name must not authorize the old object's evidence.
+        store.add_workspace(zone.name, inspector_ids=[self.db.user(self.inspector).id])
+        self.assertEqual(self.db.list_events(self.inspector), [])
 
 
 if __name__ == '__main__':

@@ -27,6 +27,7 @@ DEFAULT_SETTINGS: dict[str, str | int | bool] = {
     "reconnect_seconds": 5,
     "model_path": "best.pt",
 }
+PERSONAL_SETTINGS = frozenset({"theme", "view_columns", "auto_connect", "reconnect_seconds"})
 
 
 def _new_id() -> str:
@@ -62,6 +63,8 @@ class Workspace:
     name: str
     cameras: list[Camera] = field(default_factory=list)
     id: str = field(default_factory=_new_id)
+    inspector_ids: list[int] = field(default_factory=list)
+    worker_ids: list[int] = field(default_factory=list)
 
 
 def validate_source(source: int | str) -> int | str:
@@ -207,14 +210,17 @@ class WorkspaceStore(ABC):
         workspaces: list[Workspace] = []
         ids: set[str] = set()
         for item in data["workspaces"]:
-            if not isinstance(item, dict) or set(item) != {"id", "name", "cameras"}:
+            if (not isinstance(item, dict) or not {"id", "name", "cameras"} <= set(item)
+                    or set(item) - {"id", "name", "cameras", "inspector_ids", "worker_ids"}):
                 raise ValueError("Некорректная запись рабочей зоны.")
             name = cls._clean_name(item["name"], "название рабочей зоны")
             cls._ensure_unique(name, (zone.name for zone in workspaces), "Рабочая зона")
             workspace_id = cls._read_id(item["id"], ids)
             if not isinstance(item["cameras"], list):
                 raise ValueError("Некорректный список камер.")
-            workspace = Workspace(name=name, id=workspace_id)
+            workspace = Workspace(name=name, id=workspace_id,
+                                  inspector_ids=cls._member_ids(item.get("inspector_ids", [])),
+                                  worker_ids=cls._member_ids(item.get("worker_ids", []), workers=True))
             for camera_data in item["cameras"]:
                 if not isinstance(camera_data, dict) or set(camera_data) != {
                     "id", "name", "description", "source", "rules", "enabled", "transport"
@@ -237,6 +243,15 @@ class WorkspaceStore(ABC):
                 )
             workspaces.append(workspace)
         return workspaces, settings
+
+    @staticmethod
+    def _member_ids(values, *, workers=False) -> list[int]:
+        if (not isinstance(values, (list, tuple))
+                or any(type(value) is not int or value < (1000 if workers else 1)
+                       or (workers and value > 9999) for value in values)
+                or len(values) != len(set(values))):
+            raise ValueError("Некорректный список рабочих." if workers else "Некорректный список инспекторов.")
+        return sorted(values)
 
     @staticmethod
     def _read_id(value: str, ids: set[str]) -> str:
@@ -263,10 +278,12 @@ class WorkspaceStore(ABC):
                 return workspace
         raise KeyError("Рабочая зона не найдена.")
 
-    def add_workspace(self, name: str) -> Workspace:
+    def add_workspace(self, name: str, inspector_ids=None, worker_ids=None) -> Workspace:
         name = self._clean_name(name, "название рабочей зоны")
         self._ensure_unique(name, (item.name for item in self.workspaces), "Рабочая зона")
-        workspace = Workspace(name=name)
+        workspace = Workspace(name=name,
+                              inspector_ids=self._member_ids(inspector_ids if inspector_ids is not None else []),
+                              worker_ids=self._member_ids(worker_ids if worker_ids is not None else [], workers=True))
         self.workspaces.append(workspace)
         self._commit(lambda: self.workspaces.remove(workspace))
         return workspace
@@ -278,6 +295,20 @@ class WorkspaceStore(ABC):
         previous = workspace.name
         workspace.name = name
         self._commit(lambda: setattr(workspace, "name", previous))
+
+    def update_workspace(self, workspace_id: str, name: str, inspector_ids, worker_ids) -> None:
+        workspace = self.get_workspace(workspace_id)
+        name = self._clean_name(name, "название рабочей зоны")
+        self._ensure_unique(name, (item.name for item in self.workspaces if item.id != workspace_id), "Рабочая зона")
+        inspectors = self._member_ids(inspector_ids)
+        workers = self._member_ids(worker_ids, workers=True)
+        previous = workspace.name, workspace.inspector_ids, workspace.worker_ids
+        workspace.name, workspace.inspector_ids, workspace.worker_ids = name, inspectors, workers
+
+        def undo():
+            workspace.name, workspace.inspector_ids, workspace.worker_ids = previous
+
+        self._commit(undo)
 
     def remove_workspace(self, workspace_id: str) -> None:
         workspace = self.get_workspace(workspace_id)

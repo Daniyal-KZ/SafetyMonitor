@@ -155,6 +155,32 @@ class JournalFrame(ctk.CTkFrame):
             pages = [None] if reset or filters != self._filters else list(self._pages)
         self._load_page(pages, filters)
 
+    def invalidate_access(self, *, refresh=True):
+        """Discard all previously authorized content before applying new access."""
+        if self._closed:
+            return
+        for pending in (self._filter_after, self._preview_after):
+            if pending is not None:
+                self.after_cancel(pending)
+        self._filter_after = self._preview_after = None
+        for channel in ('list', 'snapshot', 'write', 'export'):
+            self._jobs.cancel(channel)
+        self._loading = False
+        self._pending_page = None
+        self._pages, self._has_next = [None], False
+        self._cache.clear()
+        self._note_drafts.clear()
+        self._committed_notes.clear()
+        self._write_version += 1
+        self._messages.clear()
+        self._clear_selection(remember=False)
+        self._image = self._placeholder
+        self._rows.clear()
+        self.table.delete(*self.table.get_children())
+        self._update_controls()
+        if refresh:
+            self.refresh()
+
     def _load_page(self, pages, filters):
         self._loading = True
         self._pending_page = list(pages), filters
@@ -251,8 +277,7 @@ class JournalFrame(ctk.CTkFrame):
             self._clear_selection()
             return
         event_id = selection[0]
-        if event_id == self._selected:
-            self._update_controls()
+        if event_id == self._selected and self._jobs.running('snapshot'):
             return
         self._clear_selection()
         self._selected = event_id
@@ -262,17 +287,16 @@ class JournalFrame(ctk.CTkFrame):
                                      f"Вид нарушения: {violation_label(row['kind'])} · Количество: {row['object_count']}" + reviewer)
         self.note.insert(0, self._note_drafts.get(event_id, row['note']))
         self._update_controls()
-        if event_id in self._cache:
-            data, prepared = self._cache[event_id]
-            self._cache.move_to_end(event_id)
-            self.show_snapshot(event_id, data, prepared)
-            return
+        cached = self._cache.get(event_id)
         self.preview.configure(text='Загрузка кадра…')
         self._set_message('snapshot', 'Загрузка кадра…')
         version = self._selection_version
 
         def work():
+            # Recheck current assignment even when this image is cached locally.
             data = self.database.event_snapshot(self.token, event_id)
+            if cached is not None and cached[0] == data:
+                return data, cached[1]
             with Image.open(BytesIO(data)) as source:
                 image = source.convert('RGB')
                 image.thumbnail((1920, 1080))
@@ -437,11 +461,13 @@ class JournalFrame(ctk.CTkFrame):
     def export(self):
         if self._snapshot is None or self._jobs.running('export'):
             return
-        data, event_id = self._snapshot, self._selected
+        event_id = self._selected
         path = filedialog.asksaveasfilename(parent=self.winfo_toplevel(), defaultextension='.jpg',
                                           initialfile=f'safety-event-{event_id}.jpg', filetypes=[('JPEG', '*.jpg')])
         if path:
-            self._export(lambda: Path(path).write_bytes(data), lambda _: 'Кадр сохранён.')
+            # A cached preview must not bypass access revoked since it was read.
+            self._export(lambda: Path(path).write_bytes(self.database.event_snapshot(self.token, event_id)),
+                         lambda _: 'Кадр сохранён.')
 
     def next_page(self):
         if self._has_next and not self._loading and self._rows:

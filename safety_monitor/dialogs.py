@@ -10,6 +10,7 @@ import customtkinter as ctk
 from .models import MODULE_LABELS, Camera, WorkspaceStore
 from .classes import RULE_CLASSES
 from .inference import LEGACY_MODEL_PATH, MODEL_CHOICES, resolve_model_path
+from .background import ViewJobs
 from .theme import (
     BACKGROUND, BLUE, BLUE_HOVER, BORDER, BUTTON, MUTED,
     RED, SURFACE, SURFACE_ALT, TEXT, font,
@@ -120,26 +121,76 @@ class CreationDialog(ctk.CTkToplevel):
 
 
 class WorkspaceDialog(CreationDialog):
-    def __init__(self, master: ctk.CTkBaseClass, on_submit: Callable[[str], tuple],
-                 initial_name: str = "", title: str = "Новая рабочая зона") -> None:
-        super().__init__(master, title, "500x250",
+    def __init__(self, master: ctk.CTkBaseClass, on_submit: Callable,
+                 initial_name: str = "", title: str = "Новая рабочая зона", workspace=None) -> None:
+        super().__init__(master, title, "680x610",
                          "Сохранить" if initial_name else "Создать")
         self.on_submit = on_submit
+        self.workspace = workspace
+        self.inspector_vars = {}
+        self.worker_vars = {}
+        self._members_loaded = False
+        self._jobs = ViewJobs(self)
         self.name_entry = self.add_field(0, "Название:")
         if initial_name:
             self.name_entry.insert(0, initial_name)
-        ctk.CTkLabel(self.body, text="Камеры добавляются после создания рабочей зоны.",
+        ctk.CTkLabel(self.body, text="Инспекторы с доступом", font=font(13, "bold"),
+                     text_color=TEXT, anchor="w").grid(row=1, column=0, columnspan=2, sticky="ew", pady=(14, 5))
+        self.inspectors_list = ctk.CTkScrollableFrame(self.body, height=110, fg_color=SURFACE, corner_radius=3)
+        self.inspectors_list.grid(row=2, column=0, columnspan=2, sticky="ew")
+        ctk.CTkLabel(self.body, text="Рабочие в зоне", font=font(13, "bold"),
+                     text_color=TEXT, anchor="w").grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 5))
+        self.workers_list = ctk.CTkScrollableFrame(self.body, height=145, fg_color=SURFACE, corner_radius=3)
+        self.workers_list.grid(row=4, column=0, columnspan=2, sticky="ew")
+        ctk.CTkLabel(self.body,
+                     text="Можно выбрать нескольких инспекторов и рабочих.\n"
+                          "Без назначенных инспекторов зона доступна только администратору.\n"
+                          "Новые карточки создаются во вкладках «Рабочие» и «Инспекторы».",
                      font=font(12), text_color=MUTED, anchor="w").grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+            row=5, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self.save_button.configure(state="disabled")
+        app = self.master.winfo_toplevel()
+        database, token = app.database, app.token
+
+        def load():
+            return database.list_inspectors(token), database.list_workers(token)
+
+        self._jobs.submit('members', load, self._loaded, self._load_failed)
+
+    def _loaded(self, result):
+        inspectors, workers = result
+        selected_inspectors = set(self.workspace.inspector_ids) if self.workspace else set()
+        selected_workers = set(self.workspace.worker_ids) if self.workspace else set()
+        for person in inspectors:
+            variable = ctk.BooleanVar(value=person.id in selected_inspectors)
+            self.inspector_vars[person.id] = variable
+            ctk.CTkCheckBox(self.inspectors_list, text=f"{person.display_name} ({person.username})",
+                           variable=variable, font=font(12)).pack(anchor='w', padx=8, pady=5)
+        for person in workers:
+            variable = ctk.BooleanVar(value=person['id'] in selected_workers)
+            self.worker_vars[person['id']] = variable
+            ctk.CTkCheckBox(self.workers_list,
+                           text=f"{person['id']:04d} · {person['last_name']} {person['first_name']}",
+                           variable=variable, font=font(12)).pack(anchor='w', padx=8, pady=5)
+        for container, records in ((self.inspectors_list, inspectors), (self.workers_list, workers)):
+            if not records:
+                ctk.CTkLabel(container, text="Пока нет записей", text_color=MUTED).pack(pady=12)
+        self._members_loaded = True
+        self.save_button.configure(state='normal')
+
+    def _load_failed(self, message):
+        self.show_error(ValueError(message + " Закройте окно и попробуйте снова."))
 
     def submit(self) -> None:
-        if getattr(self, '_saving', False):
+        if getattr(self, '_saving', False) or not self._members_loaded:
             return
         try:
             name = self.name_entry.get().strip()
             if not name:
                 raise ValueError("Укажите название рабочей зоны.")
-            self.save_changes(*self.on_submit(name))
+            inspectors = [key for key, variable in self.inspector_vars.items() if variable.get()]
+            workers = [key for key, variable in self.worker_vars.items() if variable.get()]
+            self.save_changes(*self.on_submit(name, inspectors, workers))
         except (ValueError, OSError) as exc:
             self.show_error(exc)
             return
@@ -326,8 +377,9 @@ class ApplicationSettingsDialog(CreationDialog):
 
     def __init__(self, master: ctk.CTkBaseClass, store: WorkspaceStore,
                  on_save: Callable[[], None]) -> None:
-        super().__init__(master, "Настройки приложения", "650x510")
+        super().__init__(master, "Настройки приложения", "650x580" if store.can_manage else "610x400")
         self.store = store
+        self.can_manage = store.can_manage
         self.on_save = on_save
         group = ctk.CTkFrame(self.body, fg_color=SURFACE, corner_radius=3,
                              border_width=1, border_color=BORDER)
@@ -341,36 +393,49 @@ class ApplicationSettingsDialog(CreationDialog):
         self.auto_connect_var = ctk.BooleanVar(value=bool(store.settings["auto_connect"]))
         CameraSettingsDialog._settings_row(group, 4, "Подключать камеры при открытии зоны",
                                             self.auto_connect_var)
+        retry_values = sorted({1, 3, 5, 10, 15, 30, 60, 120, 300, int(store.settings['reconnect_seconds'])})
+        self.reconnect_menu = self._option_row(group, 6, "Повтор подключения, секунд", [str(v) for v in retry_values])
+        self.reconnect_menu.set(str(store.settings['reconnect_seconds']))
+        for row in (1, 3, 5):
+            ctk.CTkFrame(group, height=1, corner_radius=0, fg_color=BORDER).grid(
+                row=row, column=0, columnspan=2, sticky="ew", padx=12)
+        ctk.CTkLabel(self.body, text="Оформление и параметры просмотра сохраняются только для вашего аккаунта.",
+                     font=font(12), text_color=MUTED, anchor="w", wraplength=560).grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        if not self.can_manage:
+            return
         self.model_paths = {label: path for path, label in MODEL_CHOICES.items()}
         current_path = str(store.settings["model_path"])
         if current_path not in self.model_paths.values():
             self.model_paths[f"RF-DETR: {resolve_model_path(current_path).name}"] = current_path
-        self.model_menu = self._option_row(group, 6, "Модель распознавания", list(self.model_paths))
+        self.model_menu = self._option_row(group, 8, "Общая модель распознавания", list(self.model_paths))
         self.model_menu.configure(width=255)
         self.model_menu.set(next(label for label, path in self.model_paths.items() if path == current_path))
         self.model_menu.configure(command=lambda _: self._show_model_path())
         ctk.CTkButton(group, text="Выбрать файл RF-DETR…", command=self._choose_model,
                       width=210, height=28, corner_radius=3).grid(
-            row=7, column=1, sticky="e", padx=14, pady=(0, 9))
+            row=9, column=1, sticky="e", padx=14, pady=(0, 9))
         self.model_path_label = ctk.CTkLabel(
             self.body, text="", font=font(11), text_color=MUTED,
             anchor="w", justify="left", wraplength=590)
-        self.model_path_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self.model_path_label.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         self._show_model_path()
-        for row in (1, 3, 5):
+        for row in (7,):
             ctk.CTkFrame(group, height=1, corner_radius=0, fg_color=BORDER).grid(
                 row=row, column=0, columnspan=2, sticky="ew", padx=12)
         ctk.CTkLabel(self.body,
                      text="Для RF-DETR нужны файл .pt и соответствующая карта .labels.json.\n"
                           "Модель применяется ко всем камерам и сохраняется между запусками.",
                      font=font(12), text_color=MUTED, anchor="w", justify="left").grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+            row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
     def _show_model_path(self) -> None:
         path = resolve_model_path(self.model_paths[self.model_menu.get()])
         self.model_path_label.configure(text=str(path) + ("" if path.is_file() else "\nФайл пока отсутствует."))
 
     def _choose_model(self) -> None:
+        if not self.can_manage:
+            return
         path = filedialog.askopenfilename(parent=self, title="Модель RF-DETR",
                                           filetypes=[("Веса RF-DETR", "*.pt")])
         if path:
@@ -402,8 +467,8 @@ class ApplicationSettingsDialog(CreationDialog):
         return menu
 
     def submit(self) -> None:
-        model_path = self.model_paths[self.model_menu.get()]
-        if model_path != self.store.settings["model_path"]:
+        model_path = self.model_paths[self.model_menu.get()] if self.can_manage else self.store.settings['model_path']
+        if self.can_manage and model_path != self.store.settings["model_path"]:
             path = resolve_model_path(model_path)
             if not path.is_file():
                 self.show_error(ValueError(f"Файл модели не найден: {path}"))
@@ -413,5 +478,8 @@ class ApplicationSettingsDialog(CreationDialog):
                 return
         settings = dict(theme=self.THEME_VALUES[self.theme_menu.get()],
                         view_columns=int(self.columns_menu.get()),
-                        auto_connect=bool(self.auto_connect_var.get()), model_path=model_path)
+                        auto_connect=bool(self.auto_connect_var.get()),
+                        reconnect_seconds=int(self.reconnect_menu.get()))
+        if self.can_manage and model_path != self.store.settings['model_path']:
+            settings['model_path'] = model_path
         self.save_changes(lambda store: store.update_settings(**settings), lambda _: self.on_save())
