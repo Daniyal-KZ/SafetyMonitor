@@ -1,0 +1,2 @@
+-r requirements-rfdetr.txt
+rfdetr[train]==1.11.2

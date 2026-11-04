@@ -1,0 +1,3 @@
+# Optional RF-DETR runtime; the local YOLO model uses requirements.txt.
+-r requirements.txt
+rfdetr==1.11.2

@@ -20,6 +20,7 @@ from PIL import Image
 
 from .models import Camera
 from .detection import AnalysisWorker
+from .classes import RULE_CLASSES
 
 
 _VIDEO_BACKGROUND = "#17191C"
@@ -262,7 +263,7 @@ class VideoPlayerFrame(ctk.CTkFrame):
 
     def __init__(
         self, master, on_status: Callable[[str, str], None] | None = None,
-        reconnect_seconds: float = 5.0, on_analysis=None, **kwargs
+        reconnect_seconds: float = 5.0, on_analysis=None, model_path: str = "best.pt", **kwargs
     ) -> None:
         kwargs.setdefault("fg_color", _CARD_COLOR)
         kwargs.setdefault("corner_radius", 0)
@@ -274,6 +275,7 @@ class VideoPlayerFrame(ctk.CTkFrame):
         self.state = "disconnected"
         self.on_status = on_status
         self.on_analysis = on_analysis
+        self.model_path = model_path
         self._worker = _CaptureWorker(reconnect_seconds=reconnect_seconds)
         self._analysis = AnalysisWorker()
         self._analysis_context = None
@@ -414,22 +416,25 @@ class VideoPlayerFrame(ctk.CTkFrame):
                 else:
                     self._cached_frame = packet.frame
             if packet is not None and packet.generation == self._generation and packet.frame is not None:
-                enabled = bool(self.camera and self.camera.rules.helmet)
+                required = tuple(rule for rule in RULE_CLASSES
+                                 if self.camera and getattr(self.camera.rules, rule))
+                signature = self._generation, required, self.model_path
                 if (self._analysis_context is None or
-                        self._analysis_context[:2] != (self._generation, enabled)):
+                        self._analysis_context[:-1] != signature):
                     self._analysis_epoch += 1
-                    self._analysis_context = self._generation, enabled, self._analysis_epoch
+                    self._analysis_context = (*signature, self._analysis_epoch)
                     self._analysis_sequence = -1
                     self._last_analysis_submit = 0.0
                     self._last_analysis_packet = None
                     self._last_render_key = None
                 context = self._analysis_context
-                if enabled:
+                if required:
                     now = time.monotonic()
                     analysis_key = (*context, packet.sequence)
                     if (now - self._last_analysis_submit >= 0.2 and
                             analysis_key != self._last_analysis_packet):
-                        self._analysis.submit(analysis_key, packet.frame)
+                        self._analysis.submit(analysis_key, packet.frame,
+                                              required=required, model_path=self.model_path)
                         self._last_analysis_submit = now
                         self._last_analysis_packet = analysis_key
                     result = self._analysis.snapshot()
@@ -442,10 +447,10 @@ class VideoPlayerFrame(ctk.CTkFrame):
                                 self.on_analysis(self.camera, self.workspace_name, result)
                         self._set_status("streaming", result.status)
                     else:
-                        self._set_status("streaming", "Загрузка best.pt / анализ касок…")
+                        self._set_status("streaming", "Загрузка модели / анализ СИЗ…")
                 else:
                     self._cached_frame = packet.frame
-                    self._set_status("streaming", "Подключено · Контроль касок выключен")
+                    self._set_status("streaming", "Подключено · Контроль СИЗ выключен")
             if self._cached_frame is not None:
                 self._render_current_frame()
         finally:

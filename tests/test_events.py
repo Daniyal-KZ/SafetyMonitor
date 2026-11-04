@@ -12,6 +12,70 @@ from safety_monitor.events import EventRecorder
 
 
 class RecorderTests(unittest.TestCase):
+    def test_each_confirmed_ppe_kind_is_recorded_and_acknowledged(self):
+        database = Mock()
+        database.recording_token.return_value = 'recorder-token'
+        recorder = EventRecorder(database, 'token')
+        callback = Mock()
+        frame = np.zeros((40, 60, 3), dtype=np.uint8)
+        analysis = SimpleNamespace(frame=frame, violations=3, kind='no_helmet',
+                                   violation_counts=(('no_helmet', 2), ('no_vest', 1)),
+                                   on_recorded=callback)
+        try:
+            recorder.submit(SimpleNamespace(id='1', name='Camera'), 'Factory', analysis)
+        finally:
+            recorder.close()
+        self.assertEqual([(call.kwargs['kind'], call.args[4])
+                          for call in database.record_event.call_args_list],
+                         [('no_helmet', 2), ('no_vest', 1)])
+        self.assertEqual([call.args[0] for call in callback.call_args_list],
+                         ['no_helmet', 'no_vest'])
+
+    def test_unconfirmed_observations_do_not_fall_back_to_legacy_count(self):
+        database = Mock()
+        recorder = EventRecorder(database, 'token')
+        try:
+            recorder.submit(SimpleNamespace(id='1', name='Camera'), 'Factory',
+                            SimpleNamespace(frame=np.zeros((20, 20, 3), dtype=np.uint8),
+                                            violations=2, kind='no_helmet', violation_counts=()))
+        finally:
+            recorder.close()
+        database.record_event.assert_not_called()
+
+    def test_failed_ppe_write_is_not_acknowledged_and_can_retry(self):
+        database = Mock()
+        database.record_event.side_effect = [RuntimeError('offline'), 123]
+        callback = Mock()
+        recorder = EventRecorder(database, 'token')
+        camera = SimpleNamespace(id='1', name='Camera')
+        analysis = SimpleNamespace(frame=np.zeros((20, 20, 3), dtype=np.uint8),
+                                   violations=1, kind='no_vest',
+                                   violation_counts=(('no_vest', 1),), on_recorded=callback)
+        try:
+            recorder.submit(camera, 'Factory', analysis)
+            recorder._queue.join()
+            callback.assert_not_called()
+            recorder.submit(camera, 'Factory', analysis)
+        finally:
+            recorder.close()
+        self.assertEqual(database.record_event.call_count, 2)
+        callback.assert_called_once_with('no_vest')
+
+    def test_database_cooldown_does_not_acknowledge_unsaved_incident(self):
+        database = Mock()
+        database.record_event.return_value = None
+        callback = Mock()
+        recorder = EventRecorder(database, 'token')
+        try:
+            recorder.submit(SimpleNamespace(id='1', name='Camera'), 'Factory',
+                            SimpleNamespace(frame=np.zeros((20, 20, 3), dtype=np.uint8),
+                                            violations=1, kind='no_vest',
+                                            violation_counts=(('no_vest', 1),), on_recorded=callback))
+        finally:
+            recorder.close()
+        database.record_event.assert_called_once()
+        callback.assert_not_called()
+
     def test_nonblocking_close_does_not_wait_for_database(self):
         started, release = threading.Event(), threading.Event()
         database = Mock()

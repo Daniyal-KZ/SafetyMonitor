@@ -68,7 +68,7 @@ class DetectionTests(unittest.TestCase):
             worker.submit((1,), frame)
             wait_until(lambda: worker.snapshot() is not None)
             self.assertIs(worker.snapshot().frame, frame)
-            self.assertIn("best.pt не найден", worker.snapshot().status)
+            self.assertIn("missing-test-weights.pt не найден", worker.snapshot().status)
         finally:
             worker.close()
             worker._thread.join(3)

@@ -8,6 +8,8 @@ from typing import Callable
 import customtkinter as ctk
 
 from .models import MODULE_LABELS, Camera, WorkspaceStore
+from .classes import RULE_CLASSES
+from .inference import LEGACY_MODEL_PATH, MODEL_CHOICES, resolve_model_path
 from .theme import (
     BACKGROUND, BLUE, BLUE_HOVER, BORDER, BUTTON, MUTED,
     RED, SURFACE, SURFACE_ALT, TEXT, font,
@@ -267,7 +269,7 @@ class CameraSettingsDialog(CreationDialog):
     """Per-camera module selection, persisted only after a successful save."""
 
     def __init__(self, master: ctk.CTkBaseClass, camera: Camera,
-                 on_save: Callable[[dict[str, bool]], tuple]) -> None:
+                 on_save: Callable[[dict[str, bool]], tuple], model_path: str = "best.pt") -> None:
         super().__init__(master, f"Настройки камеры — {camera.name}", "570x530")
         self.camera = camera
         self.on_save = on_save
@@ -280,18 +282,23 @@ class CameraSettingsDialog(CreationDialog):
                              border_color=BORDER, border_width=1)
         group.grid(row=1, column=0, columnspan=2, sticky="ew")
         group.grid_columnconfigure(0, weight=1)
+        legacy = resolve_model_path(model_path) == LEGACY_MODEL_PATH.resolve()
+        supported = {"helmet"} if legacy else set(RULE_CLASSES)
         for index, (key, label) in enumerate(MODULE_LABELS.items()):
             self.module_vars[key] = ctk.BooleanVar(value=getattr(camera.rules, key))
             self._settings_row(group, index * 2,
-                               label if key == "helmet" else label + " (нет в модели)",
-                               self.module_vars[key], supported=key == "helmet")
+                               label if key in supported else label + " (нет в модели)",
+                               self.module_vars[key], supported=key in supported)
             if index < len(MODULE_LABELS) - 1:
                 ctk.CTkFrame(group, height=1, corner_radius=0, fg_color=BORDER).grid(
                     row=index * 2 + 1, column=0, columnspan=2, padx=12, sticky="ew")
         ctk.CTkLabel(
             self.body,
-            text="best.pt: каска, отсутствие каски и человек.\n"
-                 "Включите «Каска» для анализа. Другие СИЗ модель не распознаёт.",
+            text=("best.pt: каска, отсутствие каски и человек.\n"
+                  "Для других СИЗ выберите RF-DETR в настройках приложения."
+                  if legacy else "RF-DETR: каски, жилеты, перчатки и защитные очки.\n"
+                  "Доступные классы проверяются по карте выбранной модели.\n"
+                  "Нарушение попадает в журнал после 30 секунд наблюдения."),
             font=font(12), text_color=MUTED, anchor="w", justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
 
@@ -319,7 +326,7 @@ class ApplicationSettingsDialog(CreationDialog):
 
     def __init__(self, master: ctk.CTkBaseClass, store: WorkspaceStore,
                  on_save: Callable[[], None]) -> None:
-        super().__init__(master, "Настройки приложения", "570x350")
+        super().__init__(master, "Настройки приложения", "650x510")
         self.store = store
         self.on_save = on_save
         group = ctk.CTkFrame(self.body, fg_color=SURFACE, corner_radius=3,
@@ -334,12 +341,52 @@ class ApplicationSettingsDialog(CreationDialog):
         self.auto_connect_var = ctk.BooleanVar(value=bool(store.settings["auto_connect"]))
         CameraSettingsDialog._settings_row(group, 4, "Подключать камеры при открытии зоны",
                                             self.auto_connect_var)
-        for row in (1, 3):
+        self.model_paths = {label: path for path, label in MODEL_CHOICES.items()}
+        current_path = str(store.settings["model_path"])
+        if current_path not in self.model_paths.values():
+            self.model_paths[f"RF-DETR: {resolve_model_path(current_path).name}"] = current_path
+        self.model_menu = self._option_row(group, 6, "Модель распознавания", list(self.model_paths))
+        self.model_menu.configure(width=255)
+        self.model_menu.set(next(label for label, path in self.model_paths.items() if path == current_path))
+        self.model_menu.configure(command=lambda _: self._show_model_path())
+        ctk.CTkButton(group, text="Выбрать файл RF-DETR…", command=self._choose_model,
+                      width=210, height=28, corner_radius=3).grid(
+            row=7, column=1, sticky="e", padx=14, pady=(0, 9))
+        self.model_path_label = ctk.CTkLabel(
+            self.body, text="", font=font(11), text_color=MUTED,
+            anchor="w", justify="left", wraplength=590)
+        self.model_path_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self._show_model_path()
+        for row in (1, 3, 5):
             ctk.CTkFrame(group, height=1, corner_radius=0, fg_color=BORDER).grid(
                 row=row, column=0, columnspan=2, sticky="ew", padx=12)
-        ctk.CTkLabel(self.body, text="Параметры сохраняются между запусками приложения.",
-                     font=font(12), text_color=MUTED, anchor="w").grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ctk.CTkLabel(self.body,
+                     text="Для RF-DETR нужны файл .pt и соответствующая карта .labels.json.\n"
+                          "Модель применяется ко всем камерам и сохраняется между запусками.",
+                     font=font(12), text_color=MUTED, anchor="w", justify="left").grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+
+    def _show_model_path(self) -> None:
+        path = resolve_model_path(self.model_paths[self.model_menu.get()])
+        self.model_path_label.configure(text=str(path) + ("" if path.is_file() else "\nФайл пока отсутствует."))
+
+    def _choose_model(self) -> None:
+        path = filedialog.askopenfilename(parent=self, title="Модель RF-DETR",
+                                          filetypes=[("Веса RF-DETR", "*.pt")])
+        if path:
+            resolved = resolve_model_path(path)
+            label = next((label for label, saved in self.model_paths.items()
+                          if resolve_model_path(saved) == resolved), None)
+            if label is None:
+                base = f"RF-DETR: {resolved.name}"
+                label, number = base, 2
+                while label in self.model_paths:
+                    label = f"{base} ({number})"
+                    number += 1
+                self.model_paths[label] = path
+            self.model_menu.configure(values=list(self.model_paths))
+            self.model_menu.set(label)
+            self._show_model_path()
 
     @staticmethod
     def _option_row(group: ctk.CTkFrame, row: int, label: str,
@@ -355,7 +402,16 @@ class ApplicationSettingsDialog(CreationDialog):
         return menu
 
     def submit(self) -> None:
+        model_path = self.model_paths[self.model_menu.get()]
+        if model_path != self.store.settings["model_path"]:
+            path = resolve_model_path(model_path)
+            if not path.is_file():
+                self.show_error(ValueError(f"Файл модели не найден: {path}"))
+                return
+            if path != LEGACY_MODEL_PATH.resolve() and not path.with_suffix('.labels.json').is_file():
+                self.show_error(ValueError("Рядом с весами RF-DETR нужна карта .labels.json."))
+                return
         settings = dict(theme=self.THEME_VALUES[self.theme_menu.get()],
                         view_columns=int(self.columns_menu.get()),
-                        auto_connect=bool(self.auto_connect_var.get()))
+                        auto_connect=bool(self.auto_connect_var.get()), model_path=model_path)
         self.save_changes(lambda store: store.update_settings(**settings), lambda _: self.on_save())

@@ -84,6 +84,16 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(second.workspaces, [])
         self.assertEqual(DatabaseWorkspaceStore(self.db, self.admin).workspaces[0].name, 'Saved')
 
+    def test_model_selection_persists_and_requires_administrator(self):
+        administrator = DatabaseWorkspaceStore(self.db, self.admin)
+        self.assertEqual(administrator.settings['model_path'], 'best.pt')
+        administrator.update_settings(model_path='weights/model-v2.pt')
+        inspector = DatabaseWorkspaceStore(self.db, self.inspector)
+        self.assertEqual(inspector.settings['model_path'], 'weights/model-v2.pt')
+        with self.assertRaises(AccessDenied):
+            inspector.update_settings(model_path='best.pt')
+        self.assertEqual(inspector.settings['model_path'], 'weights/model-v2.pt')
+
     def test_events_cooldown_filters_snapshot_review_and_history(self):
         image = b'jpeg-content'
         event = self.db.record_event(self.inspector, 'camera-1', 'Entrance', 'Factory', 2, image)

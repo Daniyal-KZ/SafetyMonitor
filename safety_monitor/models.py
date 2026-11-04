@@ -25,6 +25,7 @@ DEFAULT_SETTINGS: dict[str, str | int | bool] = {
     "view_columns": 2,
     "auto_connect": True,
     "reconnect_seconds": 5,
+    "model_path": "best.pt",
 }
 
 
@@ -183,6 +184,13 @@ class WorkspaceStore(ABC):
         seconds = result["reconnect_seconds"]
         if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 300:
             raise ValueError("Интервал переподключения должен быть от 1 до 300 секунд.")
+        model_path = result["model_path"]
+        if (not isinstance(model_path, str) or not model_path.strip()
+                or "\x00" in model_path or "://" in model_path
+                or Path(model_path.strip()).suffix.lower() != ".pt"):
+            raise ValueError("Укажите локальный файл модели с расширением .pt.")
+        # A moved checkpoint must not prevent authentication or video playback.
+        result["model_path"] = model_path.strip()
         return result
 
     @classmethod

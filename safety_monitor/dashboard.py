@@ -206,6 +206,7 @@ class MainDashboard(ctk.CTkFrame, AsyncMixin):
             if camera.id in self.tiles:
                 continue
             tile = VideoPlayerFrame(self.wall, reconnect_seconds=float(self.store.settings["reconnect_seconds"]),
+                                    model_path=self.store.settings["model_path"],
                                     on_analysis=self.winfo_toplevel().recorder.submit,
                                     on_status=lambda state, detail, camera_id=camera.id:
                                     self._on_camera_status(camera_id, state, detail))
@@ -431,7 +432,8 @@ class MainDashboard(ctk.CTkFrame, AsyncMixin):
                 store.save()
             return operation, lambda _: self._refresh_table()
 
-        self._remember_dialog(CameraSettingsDialog(self, camera, save))
+        self._remember_dialog(CameraSettingsDialog(self, camera, save,
+                                                   model_path=self.store.settings["model_path"]))
 
     def application_settings(self) -> None:
         if not self.can_manage:
@@ -441,6 +443,8 @@ class MainDashboard(ctk.CTkFrame, AsyncMixin):
     def apply_settings(self) -> None:
         self.winfo_toplevel().apply_theme()
         self.columns_menu.set(str(self.store.settings["view_columns"]))
+        for tile in self.tiles.values():
+            tile.model_path = self.store.settings["model_path"]
         if hasattr(self, "content"):
             self._on_resize()
 

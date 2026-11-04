@@ -1,6 +1,7 @@
 """Opt-in journal GUI regressions; uses in-memory data and controlled I/O delays."""
 
 from datetime import datetime, timezone
+import gc
 from io import BytesIO
 import os
 from pathlib import Path
@@ -122,6 +123,11 @@ class JournalInteractionTests(unittest.TestCase):
     def setUp(self):
         import customtkinter as ctk
 
+        # These tests pump update(), not mainloop(). A worker cannot dispatch
+        # Tk font/image finalizers to that loop, so collect GUI cycles here.
+        self._gc_was_enabled = gc.isenabled()
+        gc.disable()
+        self.addCleanup(self._collect_gui_cycles)
         self.root = ctk.CTk()
         self.root.withdraw()
         self.callback_errors = []
@@ -129,6 +135,13 @@ class JournalInteractionTests(unittest.TestCase):
         self.journal = None
         self.database = None
         self.addCleanup(self._cleanup)
+
+    def _collect_gui_cycles(self):
+        try:
+            gc.collect()
+        finally:
+            if self._gc_was_enabled:
+                gc.enable()
 
     def _cleanup(self):
         if self.database is not None:
@@ -148,6 +161,9 @@ class JournalInteractionTests(unittest.TestCase):
             for after_id in self.root.tk.call('after', 'info'):
                 self.root.tk.call('after', 'cancel', after_id)
             self.root.destroy()
+            self.root.report_callback_exception = None
+            self.journal = self.database = self.root = None
+            self.callback_errors.clear()
 
     def pump(self, predicate, timeout=4):
         deadline = time.monotonic() + timeout

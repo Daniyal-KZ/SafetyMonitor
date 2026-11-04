@@ -1,5 +1,6 @@
 """Opt-in desktop + PostgreSQL test using a temporary schema and video."""
 
+import gc
 import os
 from pathlib import Path
 import tempfile
@@ -10,6 +11,21 @@ from uuid import uuid4
 
 @unittest.skipUnless(os.getenv('SAFETY_MONITOR_TEST_UI') == '1', 'Desktop integration test is opt-in')
 class DesktopTests(unittest.TestCase):
+    def setUp(self):
+        # update() does not service Tk calls from a worker the way mainloop()
+        # does. Finalize unreachable GUI cycles on this test's main thread.
+        self._gc_was_enabled = gc.isenabled()
+        gc.disable()
+        self.addCleanup(self._collect_gui_cycles)
+
+    def _collect_gui_cycles(self):
+        # addCleanup runs after the test frame and its widget locals are gone.
+        try:
+            gc.collect()
+        finally:
+            if self._gc_was_enabled:
+                gc.enable()
+
     def test_login_monitoring_event_library_roles_and_logout(self):
         import cv2
         import numpy as np
@@ -100,6 +116,17 @@ class DesktopTests(unittest.TestCase):
                 self.assertEqual(camera.name, 'Updated camera')
                 root.screen.application_settings()
                 app_settings = root.screen._dialogs[-1]
+                self.assertEqual(app_settings.model_paths[app_settings.model_menu.get()], 'best.pt')
+                missing_model = next(label for label, path in app_settings.model_paths.items()
+                                     if path == 'weights/model-v2.pt')
+                app_settings.model_menu.set(missing_model)
+                with patch('safety_monitor.dialogs.resolve_model_path') as resolve:
+                    resolve.return_value.is_file.return_value = False
+                    app_settings.submit()
+                self.assertIn('не найден', app_settings.error_label.cget('text'))
+                self.assertEqual(root.store.settings['model_path'], 'best.pt')
+                legacy_model = next(label for label, path in app_settings.model_paths.items() if path == 'best.pt')
+                app_settings.model_menu.set(legacy_model)
                 app_settings.columns_menu.set('3')
                 app_settings.submit()
                 pump(lambda: not getattr(root.screen, '_busy', False))
@@ -107,6 +134,37 @@ class DesktopTests(unittest.TestCase):
                 root.screen._set_columns('2')
                 pump(lambda: not getattr(root.screen, '_busy', False))
                 self.assertEqual(root.store.settings['view_columns'], 2)
+
+                # Selection changes all existing tiles only after the DB save.
+                # Analysis is disabled on this camera; no test checkpoint is loaded.
+                checkpoint = Path(directory) / 'custom-rfdetr.pt'
+                checkpoint.write_bytes(b'test selection only')
+                checkpoint.with_suffix('.labels.json').write_text('{}')
+                root.screen.application_settings()
+                app_settings = root.screen._dialogs[-1]
+                with patch('safety_monitor.dialogs.filedialog.askopenfilename', return_value=str(checkpoint)):
+                    app_settings._choose_model()
+                app_settings.submit()
+                pump(lambda: not getattr(root.screen, '_busy', False))
+                self.assertEqual(root.store.settings['model_path'], str(checkpoint))
+                self.assertTrue(all(t.model_path == str(checkpoint) for t in root.screen.tiles.values()))
+                root.screen.camera_settings()
+                modules = root.screen._dialogs[-1]
+                modules.module_vars['vest'].set(True)
+                modules.submit()
+                pump(lambda: not getattr(root.screen, '_busy', False))
+                self.assertTrue(camera.rules.vest)
+                root.screen.camera_settings()
+                modules = root.screen._dialogs[-1]
+                modules.module_vars['vest'].set(False)
+                modules.submit()
+                pump(lambda: not getattr(root.screen, '_busy', False))
+                root.screen.application_settings()
+                app_settings = root.screen._dialogs[-1]
+                app_settings.model_menu.set(legacy_model)
+                app_settings.submit()
+                pump(lambda: not getattr(root.screen, '_busy', False))
+                self.assertTrue(all(t.model_path == 'best.pt' for t in root.screen.tiles.values()))
 
                 # Paging must not leave actions targeting a camera on a hidden page.
                 second = root.store.add_camera(zone.id, 'Page two camera', source=str(video))
@@ -251,6 +309,8 @@ class DesktopTests(unittest.TestCase):
         finally:
             if root is not None:
                 root.close()
+                root.report_callback_exception = None
+                root = None
             with psycopg.connect(**options) as conn:
                 conn.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(schema)))
 
