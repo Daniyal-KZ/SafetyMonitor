@@ -189,7 +189,8 @@ class Database:
             document['workspaces'] = self._visible_workspaces(user, document)
         return document, row['revision']
 
-    def save_config(self, token: str, document: dict, revision: int) -> int:
+    def save_config(self, token: str, document: dict, revision: int,
+                    *, return_document: bool = False) -> int | tuple[dict, int]:
         self.user(token, admin=True)
         _, settings = WorkspaceStore._decode(document)
         with self.connect() as conn:
@@ -199,6 +200,23 @@ class Database:
             self._validate_memberships(conn, document)
             document = deepcopy(document)
             document['settings'] = settings
+            existing_numbers = {camera['id']: camera.get('display_id')
+                                for workspace in current['document']['workspaces']
+                                for camera in workspace['cameras']}
+            for workspace in document['workspaces']:
+                for camera in workspace['cameras']:
+                    previous = existing_numbers.get(camera['id'])
+                    requested = camera.get('display_id')
+                    if requested is not None and requested != previous:
+                        raise ValueError('ID камеры назначается автоматически и не изменяется.')
+            try:
+                for workspace in document['workspaces']:
+                    for camera in workspace['cameras']:
+                        previous = existing_numbers.get(camera['id'])
+                        camera['display_id'] = previous if previous is not None else conn.execute(
+                            "SELECT nextval('camera_display_id_seq') AS number").fetchone()['number']
+            except psycopg.errors.SequenceGeneratorLimitExceeded:
+                raise ValueError('Четырёхзначные ID камер закончились. Требуется расширить диапазон идентификаторов.') from None
             # A workspace save must never publish the administrator's personal
             # appearance as the default for another account.
             for key in PERSONAL_SETTINGS:
@@ -207,7 +225,10 @@ class Database:
                                'WHERE id=1 AND revision=%s RETURNING revision', (Jsonb(document), revision)).fetchone()
             if row is None:
                 raise ValueError('Объекты изменены в другом окне. Войдите заново, чтобы обновить данные.')
-            return row['revision']
+            saved_revision = row['revision']
+        # The canonical document is exposed only after the transaction commits;
+        # callers never display a camera number from a failed save.
+        return (document, saved_revision) if return_document else saved_revision
 
     def save_preferences(self, token: str, values: dict) -> None:
         user = self.user(token)
@@ -482,9 +503,16 @@ class DatabaseWorkspaceStore(WorkspaceStore):
         document = dict(version=1, settings=dict(self.settings),
                         workspaces=[asdict(w) for w in self.workspaces])
         try:
-            self.revision = self.database.save_config(self.token, document, self.revision)
+            saved, revision = self.database.save_config(self.token, document, self.revision,
+                                                        return_document=True)
         except psycopg.Error:
             raise DatabaseError('Не удалось сохранить изменения в PostgreSQL.') from None
+        numbers = {camera['id']: camera['display_id'] for workspace in saved['workspaces']
+                   for camera in workspace['cameras']}
+        for workspace in self.workspaces:
+            for camera in workspace.cameras:
+                camera.display_id = numbers[camera.id]
+        self.revision = revision
 
     def update_settings(self, **kwargs) -> None:
         values = self._validate_settings({**self.settings, **kwargs})

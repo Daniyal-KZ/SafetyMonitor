@@ -75,6 +75,36 @@ class AccessDesktopTests(unittest.TestCase):
         self.root.login_frame.submit()
         self.pump(lambda: self.root.screen is not None)
 
+    def click_member(self, member_list, person_id, column):
+        table = member_list.table
+        row_id = str(person_id)
+        table.see(row_id)
+        self.root.update_idletasks()
+        self.assertTrue(table.winfo_viewable())
+        bounds = table.bbox(row_id, column)
+        self.assertTrue(bounds, f'Member {person_id} must have a visible table cell')
+        x, y, width, height = bounds
+        table.event_generate('<ButtonPress-1>', x=x + width // 2, y=y + height // 2)
+        table.event_generate('<ButtonRelease-1>', x=x + width // 2, y=y + height // 2)
+        self.root.update()
+        self.assertEqual(table.focus(), row_id)
+        self.assertEqual(table.selection(), (row_id,))
+
+    def space_member(self, member_list):
+        table = member_list.table
+        table.focus_force()
+        self.pump(lambda: self.root.focus_get() == table)
+        table.event_generate('<KeyPress-space>')
+        table.event_generate('<KeyRelease-space>')
+        self.root.update()
+
+    def assert_members(self, member_list, expected):
+        expected = set(expected)
+        self.assertEqual({key for key, variable in member_list.variables.items() if variable.get()}, expected)
+        for row_id in member_list.table.get_children():
+            self.assertEqual(member_list.table.set(row_id, 'selected'),
+                             '☑' if int(row_id) in expected else '☐')
+
     def test_create_roster_preferences_and_live_revocation(self):
         import cv2
         import numpy as np
@@ -121,26 +151,44 @@ class AccessDesktopTests(unittest.TestCase):
             self.assertEqual(worker_ids, [1000, 1001])
             self.assertTrue(db.get_worker(external_admin, 1000)['photo'])
 
+            # Mouse/key events require mapped widgets, unlike direct variable writes.
+            root.deiconify()
             manager = root.screen.workspace_manager
             manager.create_workspace()
             dialog = manager.dialog
-            self.pump(lambda: dialog._members_loaded)
+            self.pump(lambda: dialog._members_loaded and dialog.winfo_viewable())
             dialog.name_entry.insert(0, 'Монтаж')
-            dialog.inspector_vars[inspector_id].set(True)
-            dialog.inspector_vars[other.id].set(True)
-            dialog.worker_vars[1000].set(True)
+            self.click_member(dialog.inspectors_list, inspector_id, 'name')
+            self.click_member(dialog.inspectors_list, other.id, 'login')
+            # Moving the highlighted row must preserve the previous checkbox.
+            self.assert_members(dialog.inspectors_list, [inspector_id, other.id])
+            self.click_member(dialog.workers_list, 1000, 'last')
+            self.click_member(dialog.workers_list, 1001, 'selected')
+            self.assert_members(dialog.workers_list, [1000, 1001])
+            # Space switches only the focused row and must also repaint its mark.
+            self.space_member(dialog.workers_list)
+            self.assert_members(dialog.workers_list, [1000])
             dialog.submit()
-            self.pump(lambda: not getattr(root.screen, '_busy', False) and len(root.store.workspaces) == 1)
+            self.pump(lambda: not dialog.winfo_exists() and not getattr(root.screen, '_busy', False)
+                      and len(root.store.workspaces) == 1)
             zone = root.store.workspaces[0]
             self.assertEqual(zone.inspector_ids, sorted([inspector_id, other.id]))
             self.assertEqual(zone.worker_ids, [1000])
-            # Opening the same editor must retain both selections.
+            persisted = DatabaseWorkspaceStore(db, external_admin).get_workspace(zone.id)
+            self.assertEqual(persisted.inspector_ids, sorted([inspector_id, other.id]))
+            self.assertEqual(persisted.worker_ids, [1000])
+            # Reopening restores checked and unchecked rows from the saved roster.
             manager.rename_workspace()
             dialog = manager.dialog
-            self.pump(lambda: dialog._members_loaded)
-            self.assertTrue(dialog.inspector_vars[other.id].get())
-            self.assertTrue(dialog.worker_vars[1000].get())
+            self.pump(lambda: dialog._members_loaded and dialog.winfo_viewable())
+            self.assert_members(dialog.inspectors_list, [inspector_id, other.id])
+            self.assert_members(dialog.workers_list, [1000])
+            self.click_member(dialog.inspectors_list, other.id, 'name')
+            self.assert_members(dialog.inspectors_list, [inspector_id])
+            self.space_member(dialog.inspectors_list)
+            self.assert_members(dialog.inspectors_list, [inspector_id, other.id])
             dialog.destroy()
+            root.withdraw()
 
             hidden = root.store.add_workspace('Закрытая зона', [other.id], [1001])
             video = Path(folder) / 'camera.avi'

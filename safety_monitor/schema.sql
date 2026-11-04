@@ -42,6 +42,7 @@ BEGIN
         INSERT INTO schema_version(version) VALUES (2);
     END IF;
 END $$;
+
 CREATE INDEX IF NOT EXISTS events_camera_kind_time_idx ON events(camera_id, kind, occurred_at DESC);
 
 CREATE TABLE IF NOT EXISTS user_preferences (
@@ -98,5 +99,37 @@ BEGIN
             WHERE c.id=1 AND w->>'name'=e.workspace_name HAVING count(*)=1)
         WHERE e.workspace_id IS NULL;
         INSERT INTO schema_version(version) VALUES (3);
+    END IF;
+END $$;
+
+CREATE SEQUENCE IF NOT EXISTS camera_display_id_seq AS integer
+    START WITH 1000 MINVALUE 1000 MAXVALUE 9999 NO CYCLE;
+DO $$
+DECLARE
+    configuration jsonb;
+    updated_workspaces jsonb := '[]'::jsonb;
+    updated_cameras jsonb;
+    workspace jsonb;
+    camera jsonb;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version=4) THEN
+        SELECT document INTO configuration FROM application_config WHERE id=1 FOR UPDATE;
+        IF FOUND THEN
+            -- Array order, UUIDs, assignments and camera settings are retained.
+            FOR workspace IN SELECT value FROM jsonb_array_elements(configuration->'workspaces')
+            LOOP
+                updated_cameras := '[]'::jsonb;
+                FOR camera IN SELECT value FROM jsonb_array_elements(workspace->'cameras')
+                LOOP
+                    updated_cameras := updated_cameras || jsonb_build_array(camera ||
+                        jsonb_build_object('display_id', nextval('camera_display_id_seq')));
+                END LOOP;
+                updated_workspaces := updated_workspaces || jsonb_build_array(
+                    jsonb_set(workspace, '{cameras}', updated_cameras));
+            END LOOP;
+            UPDATE application_config SET document=jsonb_set(configuration, '{workspaces}', updated_workspaces),
+                revision=revision+1, updated_at=now() WHERE id=1;
+        END IF;
+        INSERT INTO schema_version(version) VALUES (4);
     END IF;
 END $$;

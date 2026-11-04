@@ -313,7 +313,7 @@ class JournalFrame(ctk.CTkFrame):
 
         def failed(message):
             if version == self._selection_version and self._selected == event_id:
-                self.preview.configure(text='Кадр недоступен. Запись можно проверить или удалить.')
+                self.preview.configure(text='Кадр недоступен.')
                 self._set_message('snapshot', message, True)
                 self._update_controls()
 

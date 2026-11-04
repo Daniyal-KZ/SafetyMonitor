@@ -56,6 +56,7 @@ class Camera:
     enabled: bool = True
     transport: str = "tcp"
     id: str = field(default_factory=_new_id)
+    display_id: int | None = None
 
 
 @dataclass
@@ -209,6 +210,7 @@ class WorkspaceStore(ABC):
         settings = cls._validate_settings(data.get("settings", {}))
         workspaces: list[Workspace] = []
         ids: set[str] = set()
+        camera_numbers: set[int] = set()
         for item in data["workspaces"]:
             if (not isinstance(item, dict) or not {"id", "name", "cameras"} <= set(item)
                     or set(item) - {"id", "name", "cameras", "inspector_ids", "worker_ids"}):
@@ -222,10 +224,16 @@ class WorkspaceStore(ABC):
                                   inspector_ids=cls._member_ids(item.get("inspector_ids", [])),
                                   worker_ids=cls._member_ids(item.get("worker_ids", []), workers=True))
             for camera_data in item["cameras"]:
-                if not isinstance(camera_data, dict) or set(camera_data) != {
-                    "id", "name", "description", "source", "rules", "enabled", "transport"
-                }:
+                required_keys = {"id", "name", "description", "source", "rules", "enabled", "transport"}
+                if (not isinstance(camera_data, dict) or not required_keys <= set(camera_data)
+                        or set(camera_data) - required_keys - {"display_id"}):
                     raise ValueError("Некорректная запись камеры.")
+                display_id = camera_data.get("display_id")
+                if display_id is not None:
+                    if (type(display_id) is not int or not 1000 <= display_id <= 9999
+                            or display_id in camera_numbers):
+                        raise ValueError("ID камеры должен быть уникальным четырёхзначным числом.")
+                    camera_numbers.add(display_id)
                 values = cls._camera_values(
                     check_file=False,
                     **{key: camera_data[key] for key in ("name", "description", "source", "transport", "enabled")}
@@ -239,7 +247,8 @@ class WorkspaceStore(ABC):
                 ):
                     raise ValueError("Некорректные настройки модулей СИЗ.")
                 workspace.cameras.append(
-                    Camera(**values, rules=Rules(**rule_data), id=cls._read_id(camera_data["id"], ids))
+                    Camera(**values, rules=Rules(**rule_data), id=cls._read_id(camera_data["id"], ids),
+                           display_id=display_id)
                 )
             workspaces.append(workspace)
         return workspaces, settings

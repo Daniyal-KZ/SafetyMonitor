@@ -129,14 +129,15 @@ class MainDashboard(ctk.CTkFrame, AsyncMixin):
     def _build_camera_table(self) -> None:
         tab = self.tabs.tab("Камеры")
         tab.grid_columnconfigure(0, weight=1)
-        columns = ("name", "state", "source", "modules")
+        columns = ("id", "name", "state", "source", "modules")
         self.camera_table = ttk.Treeview(tab, columns=columns, show="headings", selectmode="browse",
                                          style="Camera.Treeview")
         self.camera_table.grid(row=0, column=0, sticky="nsew", padx=(4, 0), pady=(4, 0))
-        for key, title, width in (("name", "Камера", 155), ("state", "Состояние", 150),
+        for key, title, width in (("id", "ID", 70), ("name", "Камера", 155), ("state", "Состояние", 150),
                                    ("source", "Источник", 300), ("modules", "Модули СИЗ", 260)):
             self.camera_table.heading(key, text=title, anchor="w")
-            self.camera_table.column(key, width=width, minwidth=90, anchor="w")
+            self.camera_table.column(key, width=width, minwidth=60 if key == 'id' else 90,
+                                     stretch=key != 'id', anchor="w")
         y_scroll = ctk.CTkScrollbar(tab, command=self.camera_table.yview, width=12)
         y_scroll.grid(row=0, column=1, sticky="ns", pady=4)
         x_scroll = ctk.CTkScrollbar(tab, command=self.camera_table.xview, orientation="horizontal", height=12)
@@ -145,9 +146,6 @@ class MainDashboard(ctk.CTkFrame, AsyncMixin):
         self.camera_table.bind("<<TreeviewSelect>>", self._on_table_selection)
         self.camera_table.bind("<Double-1>", lambda _event: self.edit_camera())
         self.camera_table.bind("<Button-3>", self._camera_context_menu)
-        note = ctk.CTkLabel(tab, text="Выберите камеру для изменения подключения или модулей контроля.",
-                            text_color=MUTED, font=font(12), anchor="w")
-        note.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
 
     @property
     def selected_camera(self) -> Camera | None:
@@ -177,8 +175,8 @@ class MainDashboard(ctk.CTkFrame, AsyncMixin):
     def _show_empty(self) -> None:
         self.empty_frame.grid(row=0, column=0, columnspan=max(1, self._layout_columns), sticky="ew")
         if self.workspace is None:
-            self.empty_label.configure(text="Создайте или откройте рабочую зону." if self.can_manage else
-                                       "Нет назначенных рабочих зон. Доступ назначает администратор.")
+            self.empty_label.configure(text="Рабочая зона не выбрана." if self.can_manage else
+                                       "Нет назначенных рабочих зон.")
             self.empty_button.configure(text="Создать рабочую зону…", command=self.workspace_manager.create_workspace)
         else:
             self.empty_label.configure(text="В этой рабочей зоне пока нет камер.")
@@ -266,7 +264,8 @@ class MainDashboard(ctk.CTkFrame, AsyncMixin):
                         detail = "Отключена в настройках"
                     modules = ", ".join(label for key, label in MODULE_LABELS.items() if getattr(camera.rules, key))
                     self.camera_table.insert("", "end", iid=camera.id,
-                                             values=(camera.name, detail, source_label(camera.source), modules or "Не выбраны"))
+                                             values=(f'{camera.display_id:04d}' if camera.display_id else '—',
+                                                     camera.name, detail, source_label(camera.source), modules or "Не выбраны"))
                 if self.selected_camera_id and self.camera_table.exists(self.selected_camera_id):
                     self.camera_table.selection_set(self.selected_camera_id)
         finally:

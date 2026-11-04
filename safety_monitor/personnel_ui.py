@@ -107,7 +107,7 @@ class _PersonnelDialog(CreationDialog):
 class WorkerDialog(_PersonnelDialog):
     def __init__(self, master, database, token, on_saved, worker=None):
         title = f"Рабочий {worker['id']:04d}" if worker else 'Добавить рабочего'
-        super().__init__(master, title, '560x590', on_saved)
+        super().__init__(master, title, '560x530', on_saved)
         self.database, self.token = database, token
         self.worker_id = worker['id'] if worker else None
         self._photo = worker.get('photo') if worker else None
@@ -118,10 +118,10 @@ class WorkerDialog(_PersonnelDialog):
         if worker:
             self.first_name.insert(0, worker['first_name'])
             self.last_name.insert(0, worker['last_name'])
-        ctk.CTkLabel(self.body, text=(f"ID: {self.worker_id:04d}" if worker else
-                                    'Четырёхзначный ID присвоится автоматически.'),
-                     text_color=MUTED, font=font(12), anchor='w').grid(
-            row=2, column=0, columnspan=2, sticky='ew', pady=(8, 4))
+        if worker:
+            ctk.CTkLabel(self.body, text=f"ID: {self.worker_id:04d}",
+                         text_color=MUTED, font=font(12), anchor='w').grid(
+                row=2, column=0, columnspan=2, sticky='ew', pady=(8, 4))
         self._placeholder = ctk.CTkImage(light_image=Image.new('RGB', (1, 1)), size=(1, 1))
         self._image = self._placeholder
         self.preview = ctk.CTkLabel(self.body, text='Фото не добавлено', image=self._placeholder,
@@ -131,9 +131,6 @@ class WorkerDialog(_PersonnelDialog):
         actions.grid(row=4, column=0, columnspan=2, pady=6)
         button(actions, text='Выбрать фото…', command=self.choose_photo, width=145).grid(row=0, column=0, padx=4)
         button(actions, text='Убрать фото', command=self.remove_photo, width=120).grid(row=0, column=1, padx=4)
-        ctk.CTkLabel(self.body, text='Фото необязательно. Рабочему не нужен логин или пароль.',
-                     text_color=MUTED, font=font(12), anchor='w').grid(
-            row=5, column=0, columnspan=2, sticky='ew', pady=(8, 0))
         if self._photo:
             self._jobs.submit('photo', lambda: photo_preview(self._photo), self._show_photo,
                               lambda message: self.show_error(ValueError(message)))
@@ -199,16 +196,13 @@ class WorkerDialog(_PersonnelDialog):
 
 class InspectorDialog(_PersonnelDialog):
     def __init__(self, master, database, token, on_saved):
-        super().__init__(master, 'Добавить инспектора', '550x360', on_saved)
+        super().__init__(master, 'Добавить инспектора', '550x310', on_saved)
         self.database, self.token = database, token
         self.display_name = self.add_field(0, 'Имя и фамилия:')
         self.name_entry = self.display_name
         self.username = self.add_field(1, 'Логин:', 'От 3 до 32 латинских символов')
         self.password = self.add_field(2, 'Пароль:', 'Не меньше 5 символов')
         self.password.configure(show='•')
-        ctk.CTkLabel(self.body, text='Доступ к рабочим зонам назначается в настройках зоны.',
-                     font=font(12), text_color=MUTED, anchor='w').grid(
-            row=3, column=0, columnspan=2, sticky='ew', pady=(12, 0))
 
     def submit(self):
         name, username, password = self.display_name.get().strip(), self.username.get().strip(), self.password.get()
@@ -517,7 +511,7 @@ class InspectorsFrame(ctk.CTkFrame):
             self.table.delete(*self.table.get_children())
             for user in users:
                 self.table.insert('', 'end', iid=str(user.id), values=(user.display_name, user.username))
-            self.status.configure(text=f'Инспекторов: {len(users)}. Доступ назначается в настройках рабочей зоны.',
+            self.status.configure(text=f'Инспекторов: {len(users)}',
                                   text_color=MUTED)
 
         self._jobs.submit('list', lambda: self.database.list_inspectors(self.token), loaded,

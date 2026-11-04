@@ -94,7 +94,9 @@ class DesktopTests(unittest.TestCase):
                 zone = root.store.add_workspace('UI object', inspector_ids=[inspector_id])
                 camera = root.store.add_camera(zone.id, 'UI camera', source=str(video))
                 root.screen.workspace_manager.select_workspace(zone.id)
+                self.assertEqual(root.screen.camera_table.set(camera.id, 'id'), '1000')
                 tile = root.screen.tiles[camera.id]
+                self.assertEqual(tile.name_label.cget('text'), '1000 · UI camera')
                 tile._analysis._detector = PositiveDetector()
                 tile.connect()
                 pump(lambda: tile._analysis_sequence >= 0)
@@ -110,6 +112,8 @@ class DesktopTests(unittest.TestCase):
                 self.assertFalse(camera.rules.helmet)
                 root.screen.edit_camera()
                 camera_dialog = root.screen._dialogs[-1]
+                self.assertEqual(camera_dialog.id_entry.get(), '1000')
+                self.assertEqual(camera_dialog.id_entry.cget('state'), 'readonly')
                 camera_dialog.name_entry.delete(0, 'end')
                 camera_dialog.name_entry.insert(0, 'Updated camera')
                 camera_dialog.submit()
@@ -249,11 +253,11 @@ class DesktopTests(unittest.TestCase):
                 save_started, allow_save = threading.Event(), threading.Event()
                 real_save = db.save_config
 
-                def delayed_save(*args):
+                def delayed_save(*args, **kwargs):
                     save_started.set()
                     if not allow_save.wait(3):
                         raise TimeoutError('Tk did not process its scheduled callback')
-                    return real_save(*args)
+                    return real_save(*args, **kwargs)
 
                 with patch.object(db, 'save_config', side_effect=delayed_save):
                     root.after(150, allow_save.set)

@@ -342,7 +342,8 @@ class VideoPlayerFrame(ctk.CTkFrame):
         if self._closed:
             return
         self.camera, self.workspace_name = camera, workspace_name
-        self.name_label.configure(text=camera.name)
+        self.name_label.configure(text=f'{camera.display_id:04d} · {camera.name}'
+                                  if camera.display_id else camera.name)
         self.disconnect()
         if auto_connect and getattr(camera, "enabled", True):
             self.connect()

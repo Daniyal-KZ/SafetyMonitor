@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tkinter import TclError, filedialog
+from tkinter import TclError, filedialog, ttk
 from typing import Callable
 
 import customtkinter as ctk
@@ -120,10 +120,65 @@ class CreationDialog(ctk.CTkToplevel):
         raise NotImplementedError
 
 
+class _MemberTable(ctk.CTkFrame):
+    """Persistent checkboxes in a scrollable table of workspace members."""
+
+    def __init__(self, master, columns, variables, height):
+        super().__init__(master, fg_color=SURFACE, corner_radius=0, height=1, width=1)
+        self.variables = variables
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.table = ttk.Treeview(
+            self, columns=('selected', *(key for key, _, _ in columns)),
+            show='headings', selectmode='browse', height=height, style='Camera.Treeview')
+        self.table.grid(row=0, column=0, sticky='nsew')
+        self.table.heading('selected', text='Выбор', anchor='center')
+        self.table.column('selected', width=66, minwidth=66, stretch=False, anchor='center')
+        for key, title, width in columns:
+            self.table.heading(key, text=title, anchor='w')
+            self.table.column(key, width=width, minwidth=60, anchor='w', stretch=key != 'id')
+        scrollbar = ctk.CTkScrollbar(self, command=self.table.yview, width=12, height=1)
+        scrollbar.grid(row=0, column=1, sticky='ns')
+        self.table.configure(yscrollcommand=scrollbar.set)
+        self.table.bind('<Button-1>', self._click)
+        self.table.bind('<space>', self._toggle_focused)
+        self.status = ctk.CTkLabel(self, text='Загрузка…', text_color=MUTED, font=font(12))
+        self.status.grid(row=1, column=0, columnspan=2, pady=4)
+
+    def add(self, person_id, values, selected):
+        variable = ctk.BooleanVar(master=self, value=selected)
+        self.variables[person_id] = variable
+        row_id = str(person_id)
+        self.table.insert('', 'end', iid=row_id, values=('☑' if selected else '☐', *values))
+        variable.trace_add('write', lambda *_: self.table.set(
+            row_id, 'selected', '☑' if variable.get() else '☐'))
+
+    def loaded(self):
+        if self.variables:
+            self.status.grid_remove()
+        else:
+            self.status.configure(text='Пока нет записей')
+
+    def _click(self, event):
+        row_id = self.table.identify_row(event.y)
+        if self.table.identify_region(event.x, event.y) == 'cell' and row_id:
+            self.table.focus_set()
+            self.table.focus(row_id)
+            self.table.selection_set(row_id)
+            return self._toggle_focused()
+
+    def _toggle_focused(self, _event=None):
+        row_id = self.table.focus()
+        if row_id:
+            variable = self.variables[int(row_id)]
+            variable.set(not variable.get())
+        return 'break'
+
+
 class WorkspaceDialog(CreationDialog):
     def __init__(self, master: ctk.CTkBaseClass, on_submit: Callable,
                  initial_name: str = "", title: str = "Новая рабочая зона", workspace=None) -> None:
-        super().__init__(master, title, "680x610",
+        super().__init__(master, title, "680x580",
                          "Сохранить" if initial_name else "Создать")
         self.on_submit = on_submit
         self.workspace = workspace
@@ -131,23 +186,22 @@ class WorkspaceDialog(CreationDialog):
         self.worker_vars = {}
         self._members_loaded = False
         self._jobs = ViewJobs(self)
+        self.body.grid_rowconfigure(4, weight=1)
         self.name_entry = self.add_field(0, "Название:")
         if initial_name:
             self.name_entry.insert(0, initial_name)
         ctk.CTkLabel(self.body, text="Инспекторы с доступом", font=font(13, "bold"),
                      text_color=TEXT, anchor="w").grid(row=1, column=0, columnspan=2, sticky="ew", pady=(14, 5))
-        self.inspectors_list = ctk.CTkScrollableFrame(self.body, height=110, fg_color=SURFACE, corner_radius=3)
+        self.inspectors_list = _MemberTable(self.body,
+            (('id', 'ID', 65), ('name', 'Имя и фамилия', 260), ('login', 'Логин', 190)),
+            self.inspector_vars, height=3)
         self.inspectors_list.grid(row=2, column=0, columnspan=2, sticky="ew")
         ctk.CTkLabel(self.body, text="Рабочие в зоне", font=font(13, "bold"),
                      text_color=TEXT, anchor="w").grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 5))
-        self.workers_list = ctk.CTkScrollableFrame(self.body, height=145, fg_color=SURFACE, corner_radius=3)
-        self.workers_list.grid(row=4, column=0, columnspan=2, sticky="ew")
-        ctk.CTkLabel(self.body,
-                     text="Можно выбрать нескольких инспекторов и рабочих.\n"
-                          "Без назначенных инспекторов зона доступна только администратору.\n"
-                          "Новые карточки создаются во вкладках «Рабочие» и «Инспекторы».",
-                     font=font(12), text_color=MUTED, anchor="w").grid(
-            row=5, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self.workers_list = _MemberTable(self.body,
+            (('id', 'ID', 65), ('last', 'Фамилия', 225), ('first', 'Имя', 225)),
+            self.worker_vars, height=4)
+        self.workers_list.grid(row=4, column=0, columnspan=2, sticky="nsew")
         self.save_button.configure(state="disabled")
         app = self.master.winfo_toplevel()
         database, token = app.database, app.token
@@ -162,19 +216,14 @@ class WorkspaceDialog(CreationDialog):
         selected_inspectors = set(self.workspace.inspector_ids) if self.workspace else set()
         selected_workers = set(self.workspace.worker_ids) if self.workspace else set()
         for person in inspectors:
-            variable = ctk.BooleanVar(value=person.id in selected_inspectors)
-            self.inspector_vars[person.id] = variable
-            ctk.CTkCheckBox(self.inspectors_list, text=f"{person.display_name} ({person.username})",
-                           variable=variable, font=font(12)).pack(anchor='w', padx=8, pady=5)
+            self.inspectors_list.add(person.id, (person.id, person.display_name, person.username),
+                                     person.id in selected_inspectors)
         for person in workers:
-            variable = ctk.BooleanVar(value=person['id'] in selected_workers)
-            self.worker_vars[person['id']] = variable
-            ctk.CTkCheckBox(self.workers_list,
-                           text=f"{person['id']:04d} · {person['last_name']} {person['first_name']}",
-                           variable=variable, font=font(12)).pack(anchor='w', padx=8, pady=5)
-        for container, records in ((self.inspectors_list, inspectors), (self.workers_list, workers)):
-            if not records:
-                ctk.CTkLabel(container, text="Пока нет записей", text_color=MUTED).pack(pady=12)
+            self.workers_list.add(person['id'],
+                (f"{person['id']:04d}", person['last_name'], person['first_name']),
+                person['id'] in selected_workers)
+        self.inspectors_list.loaded()
+        self.workers_list.loaded()
         self._members_loaded = True
         self.save_button.configure(state='normal')
 
@@ -203,26 +252,29 @@ class CameraDialog(CreationDialog):
                  on_submit: Callable[[str, str, int | str, str, bool], tuple],
                  camera: Camera | None = None) -> None:
         super().__init__(master, "Свойства камеры" if camera else "Добавить камеру",
-                         "640x445", "Сохранить" if camera else "Добавить")
+                         "640x475", "Сохранить" if camera else "Добавить")
         self.on_submit = on_submit
         self.camera = camera
-        self.name_entry = self.add_field(0, "Название:")
-        self.description_entry = self.add_field(1, "Описание:")
+        self.id_entry = self.add_field(0, "ID:")
+        self.id_entry.insert(0, f'{camera.display_id:04d}' if camera and camera.display_id else '—')
+        self.id_entry.configure(state='readonly')
+        self.name_entry = self.add_field(1, "Название:")
+        self.description_entry = self.add_field(2, "Описание:")
 
         ctk.CTkLabel(self.body, text="Тип подключения:", font=font(), text_color=TEXT,
-                     anchor="w").grid(row=2, column=0, sticky="w", padx=(0, 16), pady=6)
+                     anchor="w").grid(row=3, column=0, sticky="w", padx=(0, 16), pady=6)
         self.source_menu = ctk.CTkOptionMenu(
             self.body, values=list(self.SOURCE_KINDS), command=self._change_source,
             height=30, corner_radius=3, font=font(), dropdown_font=font(),
             fg_color=BUTTON, button_color=BORDER, button_hover_color=BLUE,
             text_color=TEXT, dropdown_fg_color=SURFACE, dropdown_text_color=TEXT)
-        self.source_menu.grid(row=2, column=1, sticky="ew", pady=6)
+        self.source_menu.grid(row=3, column=1, sticky="ew", pady=6)
 
         self.source_label = ctk.CTkLabel(self.body, text="Адрес RTSP:", text_color=TEXT,
                                         font=font(), anchor="w")
-        self.source_label.grid(row=3, column=0, sticky="w", padx=(0, 16), pady=6)
+        self.source_label.grid(row=4, column=0, sticky="w", padx=(0, 16), pady=6)
         source_row = ctk.CTkFrame(self.body, fg_color="transparent", corner_radius=0)
-        source_row.grid(row=3, column=1, sticky="ew", pady=6)
+        source_row.grid(row=4, column=1, sticky="ew", pady=6)
         source_row.grid_columnconfigure(0, weight=1)
         self.source_entry = ctk.CTkEntry(
             source_row, height=30, corner_radius=3, font=font(), border_width=1,
@@ -236,22 +288,22 @@ class CameraDialog(CreationDialog):
 
         self.hint_label = ctk.CTkLabel(self.body, text="", font=font(12), text_color=MUTED,
                                       wraplength=430, justify="left", anchor="w")
-        self.hint_label.grid(row=4, column=1, sticky="ew", pady=(0, 8))
+        self.hint_label.grid(row=5, column=1, sticky="ew", pady=(0, 8))
         ctk.CTkLabel(self.body, text="Транспорт RTSP:", font=font(), text_color=TEXT,
-                     anchor="w").grid(row=5, column=0, sticky="w", padx=(0, 16), pady=6)
+                     anchor="w").grid(row=6, column=0, sticky="w", padx=(0, 16), pady=6)
         self.transport_menu = ctk.CTkOptionMenu(
             self.body, values=["TCP", "UDP"], height=30, corner_radius=3,
             fg_color=BUTTON, button_color=BORDER, button_hover_color=BLUE,
             text_color=TEXT, dropdown_fg_color=SURFACE, dropdown_text_color=TEXT,
             font=font(), dropdown_font=font())
-        self.transport_menu.grid(row=5, column=1, sticky="w", pady=6)
+        self.transport_menu.grid(row=6, column=1, sticky="w", pady=6)
         self.enabled_var = ctk.BooleanVar(value=camera.enabled if camera else True)
         self.enabled_checkbox = ctk.CTkCheckBox(
             self.body, text="Камера включена", variable=self.enabled_var,
             checkbox_width=18, checkbox_height=18, corner_radius=2, border_width=1,
             border_color=BORDER, fg_color=BLUE, hover_color=BLUE_HOVER,
             text_color=TEXT, font=font())
-        self.enabled_checkbox.grid(row=6, column=1, sticky="w", pady=(12, 0))
+        self.enabled_checkbox.grid(row=7, column=1, sticky="w", pady=(12, 0))
 
         if camera:
             self.name_entry.insert(0, camera.name)
@@ -275,10 +327,8 @@ class CameraDialog(CreationDialog):
         self.browse_button.configure(state="normal" if kind == self.SOURCE_KINDS[2] else "disabled")
         self.transport_menu.configure(state="normal" if rtsp else "disabled")
         self.hint_label.configure(text=(
-            "Формат: rtsp://пользователь:пароль@адрес:554/путь\n"
-            "Точный путь потока указан в настройках IP-камеры." if rtsp else
-            "Номер USB-камеры в системе, начиная с 0." if usb else
-            "Поддерживаются MP4, AVI, MOV, MKV и другие форматы OpenCV."))
+            "rtsp://пользователь:пароль@адрес:554/путь" if rtsp else
+            "Индекс: 0, 1, 2…" if usb else "MP4, AVI, MOV, MKV"))
 
     def _browse(self) -> None:
         path = filedialog.askopenfilename(
@@ -321,7 +371,7 @@ class CameraSettingsDialog(CreationDialog):
 
     def __init__(self, master: ctk.CTkBaseClass, camera: Camera,
                  on_save: Callable[[dict[str, bool]], tuple], model_path: str = "best.pt") -> None:
-        super().__init__(master, f"Настройки камеры — {camera.name}", "570x530")
+        super().__init__(master, f"Настройки камеры — {camera.name}", "570x475")
         self.camera = camera
         self.on_save = on_save
         self.module_vars: dict[str, ctk.BooleanVar] = {}
@@ -343,15 +393,6 @@ class CameraSettingsDialog(CreationDialog):
             if index < len(MODULE_LABELS) - 1:
                 ctk.CTkFrame(group, height=1, corner_radius=0, fg_color=BORDER).grid(
                     row=index * 2 + 1, column=0, columnspan=2, padx=12, sticky="ew")
-        ctk.CTkLabel(
-            self.body,
-            text=("best.pt: каска, отсутствие каски и человек.\n"
-                  "Для других СИЗ выберите RF-DETR в настройках приложения."
-                  if legacy else "RF-DETR: каски, жилеты, перчатки и защитные очки.\n"
-                  "Доступные классы проверяются по карте выбранной модели.\n"
-                  "Нарушение попадает в журнал после 30 секунд наблюдения."),
-            font=font(12), text_color=MUTED, anchor="w", justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
 
     @staticmethod
     def _settings_row(group: ctk.CTkFrame, row: int, text: str,
@@ -377,7 +418,7 @@ class ApplicationSettingsDialog(CreationDialog):
 
     def __init__(self, master: ctk.CTkBaseClass, store: WorkspaceStore,
                  on_save: Callable[[], None]) -> None:
-        super().__init__(master, "Настройки приложения", "650x580" if store.can_manage else "610x400")
+        super().__init__(master, "Настройки приложения", "650x480" if store.can_manage else "610x350")
         self.store = store
         self.can_manage = store.can_manage
         self.on_save = on_save
@@ -399,9 +440,6 @@ class ApplicationSettingsDialog(CreationDialog):
         for row in (1, 3, 5):
             ctk.CTkFrame(group, height=1, corner_radius=0, fg_color=BORDER).grid(
                 row=row, column=0, columnspan=2, sticky="ew", padx=12)
-        ctk.CTkLabel(self.body, text="Оформление и параметры просмотра сохраняются только для вашего аккаунта.",
-                     font=font(12), text_color=MUTED, anchor="w", wraplength=560).grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         if not self.can_manage:
             return
         self.model_paths = {label: path for path, label in MODEL_CHOICES.items()}
@@ -423,11 +461,6 @@ class ApplicationSettingsDialog(CreationDialog):
         for row in (7,):
             ctk.CTkFrame(group, height=1, corner_radius=0, fg_color=BORDER).grid(
                 row=row, column=0, columnspan=2, sticky="ew", padx=12)
-        ctk.CTkLabel(self.body,
-                     text="Для RF-DETR нужны файл .pt и соответствующая карта .labels.json.\n"
-                          "Модель применяется ко всем камерам и сохраняется между запусками.",
-                     font=font(12), text_color=MUTED, anchor="w", justify="left").grid(
-            row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
     def _show_model_path(self) -> None:
         path = resolve_model_path(self.model_paths[self.model_menu.get()])
