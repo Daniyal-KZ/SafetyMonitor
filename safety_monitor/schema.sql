@@ -43,6 +43,18 @@ BEGIN
     END IF;
 END $$;
 
+-- Retain inspector identity for journal history while allowing a deleted
+-- login to be used by a new account with a different ID and no assignments.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_version WHERE version=5) THEN
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+        ALTER TABLE users DROP CONSTRAINT IF EXISTS users_username_key;
+        CREATE UNIQUE INDEX users_active_username_key ON users(username) WHERE deleted_at IS NULL;
+        INSERT INTO schema_version(version) VALUES (5);
+    END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS events_camera_kind_time_idx ON events(camera_id, kind, occurred_at DESC);
 
 CREATE TABLE IF NOT EXISTS user_preferences (

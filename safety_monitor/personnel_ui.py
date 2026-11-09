@@ -195,21 +195,34 @@ class WorkerDialog(_PersonnelDialog):
 
 
 class InspectorDialog(_PersonnelDialog):
-    def __init__(self, master, database, token, on_saved):
-        super().__init__(master, 'Добавить инспектора', '550x310', on_saved)
+    def __init__(self, master, database, token, on_saved, inspector=None):
+        super().__init__(master, 'Изменить инспектора' if inspector else 'Добавить инспектора',
+                         '550x310', on_saved)
         self.database, self.token = database, token
+        self.inspector_id = inspector.id if inspector else None
         self.display_name = self.add_field(0, 'Имя и фамилия:')
         self.name_entry = self.display_name
         self.username = self.add_field(1, 'Логин:', 'От 3 до 32 латинских символов')
-        self.password = self.add_field(2, 'Пароль:', 'Не меньше 5 символов')
+        self.password = self.add_field(2, 'Новый пароль:' if inspector else 'Пароль:',
+                                       'Без изменений' if inspector else 'Не меньше 5 символов')
         self.password.configure(show='•')
+        if inspector:
+            self.display_name.insert(0, inspector.display_name)
+            self.username.insert(0, inspector.username)
 
     def submit(self):
         name, username, password = self.display_name.get().strip(), self.username.get().strip(), self.password.get()
-        if not name or not username or not password:
-            self.show_error(ValueError('Заполните имя, логин и пароль инспектора.'))
+        if not name or not username:
+            self.show_error(ValueError('Укажите имя и логин инспектора.'))
             return
-        self._write(lambda: self.database.create_inspector(self.token, username, name, password))
+        if self.inspector_id is None:
+            if not password:
+                self.show_error(ValueError('Укажите пароль инспектора.'))
+                return
+            self._write(lambda: self.database.create_inspector(self.token, username, name, password))
+        else:
+            self._write(lambda: self.database.update_inspector(
+                self.token, self.inspector_id, username, name, password=password or None))
 
 
 class WorkersFrame(ctk.CTkFrame):
@@ -470,6 +483,8 @@ class InspectorsFrame(ctk.CTkFrame):
         self.database, self.token, self.on_changed = database, token, on_changed
         self.can_manage = database.user(token).is_admin
         self._jobs, self._closed, self.dialog = ViewJobs(self), False, None
+        self._rows, self._selected = {}, None
+        self._loading = self._writing = False
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         toolbar = ctk.CTkFrame(self, fg_color='transparent')
@@ -477,20 +492,32 @@ class InspectorsFrame(ctk.CTkFrame):
         self.add_button = button(toolbar, text='Добавить инспектора…', command=self.add_inspector,
                                  width=175, state='normal' if self.can_manage else 'disabled')
         self.add_button.grid(row=0, column=0, padx=(0, 8))
-        button(toolbar, text='Обновить', command=self.refresh, width=100).grid(row=0, column=1)
+        self.edit_button = button(toolbar, text='Изменить…', command=self.edit_inspector,
+                                  width=110, state='disabled')
+        self.edit_button.grid(row=0, column=1, padx=(0, 8))
+        self.delete_button = button(toolbar, text='Удалить…', command=self.delete_inspector,
+                                    width=110, state='disabled')
+        self.delete_button.grid(row=0, column=2, padx=(0, 8))
+        self.refresh_button = button(toolbar, text='Обновить', command=self.refresh, width=100)
+        self.refresh_button.grid(row=0, column=3)
         body = ctk.CTkFrame(self, fg_color='transparent')
         body.grid(row=1, column=0, sticky='nsew', padx=12)
         body.grid_columnconfigure(0, weight=1)
         body.grid_rowconfigure(0, weight=1)
-        self.table = ttk.Treeview(body, columns=('name', 'username'), show='headings', style='Camera.Treeview')
+        self.table = ttk.Treeview(body, columns=('id', 'name', 'username'), show='headings',
+                                  selectmode='browse', style='Camera.Treeview')
         self.table.grid(row=0, column=0, sticky='nsew')
+        self.table.heading('id', text='ID')
         self.table.heading('name', text='Имя и фамилия')
         self.table.heading('username', text='Логин')
+        self.table.column('id', width=70, minwidth=55, stretch=False)
         self.table.column('name', width=300)
         self.table.column('username', width=200)
         scroll = ctk.CTkScrollbar(body, command=self.table.yview, width=12)
         scroll.grid(row=0, column=1, sticky='ns')
         self.table.configure(yscrollcommand=scroll.set)
+        self.table.bind('<<TreeviewSelect>>', self.select_inspector)
+        self.table.bind('<Double-1>', lambda _: self.edit_inspector())
         self.status = ctk.CTkLabel(self, text='', font=font(12), text_color=MUTED, anchor='w')
         self.status.grid(row=2, column=0, sticky='ew', padx=12, pady=10)
         self.refresh()
@@ -499,25 +526,55 @@ class InspectorsFrame(ctk.CTkFrame):
     def _busy(self):
         return self._jobs.any_running()
 
+    def _update_actions(self):
+        available = self.can_manage and not self._loading and not self._writing
+        selected = available and self._selected in self._rows
+        self.add_button.configure(state='normal' if available else 'disabled')
+        self.edit_button.configure(state='normal' if selected else 'disabled')
+        self.delete_button.configure(state='normal' if selected else 'disabled')
+        self.refresh_button.configure(state='disabled' if self._writing else 'normal')
+
+    def select_inspector(self, _event=None):
+        selection = self.table.selection()
+        self._selected = int(selection[0]) if selection else None
+        self._update_actions()
+
     def refresh(self, reset=False):
-        if self._closed:
+        if self._closed or self._writing:
             return
         if not self.can_manage:
             self.status.configure(text='Управление инспекторами доступно администратору.')
             return
+        previous = self._selected
+        self._loading = True
+        self._update_actions()
         self.status.configure(text='Загрузка инспекторов…', text_color=MUTED)
 
         def loaded(users):
+            self._loading = False
+            self._rows = {user.id: user for user in users}
+            self._selected = previous if previous in self._rows else None
             self.table.delete(*self.table.get_children())
             for user in users:
-                self.table.insert('', 'end', iid=str(user.id), values=(user.display_name, user.username))
+                self.table.insert('', 'end', iid=str(user.id), values=(user.id, user.display_name, user.username))
+            if self._selected is not None:
+                self.table.selection_set(str(self._selected))
             self.status.configure(text=f'Инспекторов: {len(users)}',
                                   text_color=MUTED)
+            self._update_actions()
 
-        self._jobs.submit('list', lambda: self.database.list_inspectors(self.token), loaded,
-                          lambda message: self.status.configure(text=message, text_color=RED))
+        def failed(message):
+            self._loading = False
+            self._rows.clear()
+            self._selected = None
+            self.table.delete(*self.table.get_children())
+            self._update_actions()
+            self.status.configure(text=message, text_color=RED)
 
-    def _saved(self, _user):
+        self._jobs.submit('list', lambda: self.database.list_inspectors(self.token), loaded, failed)
+
+    def _saved(self, user):
+        self._selected = user.id if user else None
         if self.on_changed:
             self.on_changed()
         self.refresh()
@@ -526,17 +583,57 @@ class InspectorsFrame(ctk.CTkFrame):
         if self._closed:
             return
         self._jobs.cancel('list')
+        self._loading = False
+        self._rows.clear()
+        self._selected = None
         self.table.delete(*self.table.get_children())
+        self._update_actions()
         if refresh:
             self.refresh()
 
     def add_inspector(self):
-        if not self.can_manage:
+        if not self.can_manage or self._loading or self._writing:
             return
         if self.dialog and self.dialog.winfo_exists():
             self.dialog.focus_set()
             return
         self.dialog = InspectorDialog(self, self.database, self.token, self._saved)
+
+    def edit_inspector(self):
+        if not self.can_manage or self._loading or self._writing or self._selected not in self._rows:
+            return
+        if self.dialog and self.dialog.winfo_exists():
+            self.dialog.focus_set()
+            return
+        self.dialog = InspectorDialog(self, self.database, self.token, self._saved,
+                                       inspector=self._rows[self._selected])
+
+    def delete_inspector(self):
+        if not self.can_manage or self._loading or self._writing or self._selected not in self._rows:
+            return
+        if self.dialog and self.dialog.winfo_exists():
+            self.dialog.focus_set()
+            return
+        inspector = self._rows[self._selected]
+        if not messagebox.askyesno('Удалить инспектора',
+                f'Удалить инспектора {inspector.display_name} ({inspector.username})?\n'
+                'Доступ к приложению и рабочим зонам будет закрыт.', parent=self):
+            return
+        self._writing = True
+        self._update_actions()
+        self.status.configure(text='Удаление…', text_color=MUTED)
+
+        def saved(_):
+            self._writing = False
+            self._saved(None)
+
+        def failed(message):
+            self._writing = False
+            self._update_actions()
+            self.status.configure(text=message, text_color=RED)
+
+        self._jobs.submit('write', lambda: self.database.delete_inspector(self.token, inspector.id),
+                          saved, failed, replace=False)
 
     def destroy(self):
         if self._closed:

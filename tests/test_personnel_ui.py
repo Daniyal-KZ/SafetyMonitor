@@ -108,6 +108,19 @@ class PersonnelDatabase:
         self.users.append(user)
         return user
 
+    def update_inspector(self, token, inspector_id, username, display_name, password=None):
+        self._called('update_inspector')
+        assert token == 'admin'
+        user = SimpleNamespace(id=inspector_id, username=username, display_name=display_name, role='inspector')
+        self.users = [user if existing.id == inspector_id else existing for existing in self.users]
+        self.last_password = password
+        return user
+
+    def delete_inspector(self, token, inspector_id):
+        self._called('delete_inspector')
+        assert token == 'admin'
+        self.users = [user for user in self.users if user.id != inspector_id]
+
 
 @unittest.skipUnless(os.getenv('SAFETY_MONITOR_TEST_UI') == '1', 'Personnel desktop tests are opt-in')
 class PersonnelUITests(unittest.TestCase):
@@ -263,6 +276,80 @@ class PersonnelUITests(unittest.TestCase):
         self.assertEqual(self.frame.table.set('3', 'username'), 'inspector2')
         self.assertEqual(len(self.db.workers), 2)
         self.changed.assert_called_once()
+
+    def test_admin_edits_inspector_and_deletes_only_after_confirmation(self):
+        from safety_monitor.personnel_ui import InspectorsFrame
+        self.frame = frame = InspectorsFrame(self.root, self.db, 'admin', on_changed=self.changed)
+        frame.pack(fill='both', expand=True)
+        self.pump(lambda: not frame._busy)
+        self.assertEqual(frame.edit_button.cget('state'), 'disabled')
+        frame.table.selection_set('2')
+        frame.select_inspector()
+        self.assertEqual(frame.delete_button.cget('state'), 'normal')
+        frame.edit_button.invoke()
+        dialog = frame.dialog
+        self.assertEqual(dialog.username.get(), 'inspector')
+        self.assertEqual(dialog.password.get(), '')
+        dialog.username.delete(0, 'end')
+        dialog.username.insert(0, 'inspector_updated')
+        dialog.display_name.delete(0, 'end')
+        dialog.display_name.insert(0, 'Новое имя')
+        dialog.submit()
+        self.pump(lambda: not dialog.winfo_exists() and not frame._busy)
+        self.assertEqual(frame.table.set('2', 'username'), 'inspector_updated')
+        self.assertEqual(frame.table.set('2', 'name'), 'Новое имя')
+        self.assertIsNone(self.db.last_password)
+        self.assertEqual(frame._selected, 2)
+        frame.edit_inspector()
+        dialog = frame.dialog
+        dialog.password.insert(0, 'new_secret')
+        dialog.submit()
+        self.pump(lambda: not dialog.winfo_exists() and not frame._busy)
+        self.assertEqual(self.db.last_password, 'new_secret')
+        with patch('safety_monitor.personnel_ui.messagebox.askyesno', return_value=False):
+            frame.delete_inspector()
+        self.assertEqual(len(self.db.users), 1)
+        with patch('safety_monitor.personnel_ui.messagebox.askyesno', return_value=True):
+            frame.delete_button.invoke()
+        self.pump(lambda: not frame._busy)
+        self.assertEqual(frame.table.get_children(), ())
+        self.assertEqual(self.db.users, [])
+        self.assertEqual(frame.delete_button.cget('state'), 'disabled')
+        self.assertEqual(len(self.db.workers), 2)
+        self.assertEqual(self.changed.call_count, 3)
+        writes = [thread for name, thread in self.db.calls if name in {'update_inspector', 'delete_inspector'}]
+        self.assertEqual(len(writes), 3)
+        self.assertTrue(all(thread != threading.get_ident() for thread in writes))
+
+    def test_failed_inspector_delete_keeps_row_and_allows_retry(self):
+        from safety_monitor.personnel_ui import InspectorsFrame
+        self.frame = frame = InspectorsFrame(self.root, self.db, 'admin', on_changed=self.changed)
+        frame.pack(fill='both', expand=True)
+        self.pump(lambda: not frame._busy)
+        frame.table.selection_set('2')
+        frame.select_inspector()
+        with patch('safety_monitor.personnel_ui.messagebox.askyesno', return_value=True), \
+                patch.object(self.db, 'delete_inspector', side_effect=ValueError('Не удалось удалить.')):
+            frame.delete_inspector()
+            self.pump(lambda: not frame._busy)
+        self.assertEqual(frame.table.get_children(), ('2',))
+        self.assertEqual(frame.delete_button.cget('state'), 'normal')
+        self.assertIn('Не удалось удалить', frame.status.cget('text'))
+        self.changed.assert_not_called()
+
+    def test_inspector_cannot_open_account_mutations(self):
+        from safety_monitor.personnel_ui import InspectorsFrame
+        self.frame = frame = InspectorsFrame(self.root, self.db, 'inspector')
+        frame.pack(fill='both', expand=True)
+        frame.add_inspector()
+        frame.edit_inspector()
+        with patch('safety_monitor.personnel_ui.messagebox.askyesno') as confirmation:
+            frame.delete_inspector()
+        confirmation.assert_not_called()
+        self.assertIsNone(frame.dialog)
+        self.assertTrue(all(control.cget('state') == 'disabled'
+                            for control in (frame.add_button, frame.edit_button, frame.delete_button)))
+        self.assertEqual(self.db.calls, [])
 
 
 if __name__ == '__main__':

@@ -93,20 +93,22 @@ class Database:
         with self.connect() as conn:
             conn.execute('SELECT pg_advisory_xact_lock(736201)')
             conn.execute((Path(__file__).with_name('schema.sql')).read_text(encoding='utf-8'))
-            for username, display_name, role in [('admin', 'Администратор', 'admin'),
-                                                 ('daniyal', 'Даниял', 'inspector')]:
-                if not conn.execute('SELECT id FROM users WHERE username=%s', (username,)).fetchone():
-                    conn.execute('INSERT INTO users(username, display_name, role, password_hash) '
-                                 'VALUES (%s,%s,%s,%s) ON CONFLICT (username) DO NOTHING',
-                                 (username, display_name, role, hash_password('12345')))
             if conn.execute('SELECT id FROM application_config WHERE id=1').fetchone() is None:
+                # The config row marks a completed first installation. Renaming
+                # or removing a seeded inspector must never recreate its login.
+                for username, display_name, role in [('admin', 'Администратор', 'admin'),
+                                                     ('daniyal', 'Даниял', 'inspector')]:
+                    conn.execute('INSERT INTO users(username, display_name, role, password_hash) '
+                                 'VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING',
+                                 (username, display_name, role, hash_password('12345')))
                 document = dict(version=1, settings=dict(DEFAULT_SETTINGS), workspaces=[])
                 conn.execute('INSERT INTO application_config(id,document) VALUES (1,%s)', (Jsonb(document),))
         self._initialized = True
 
     def login(self, username: str, password: str) -> str:
         with self.connect() as conn:
-            row = conn.execute('SELECT * FROM users WHERE username=%s', (username.strip().lower(),)).fetchone()
+            row = conn.execute('SELECT * FROM users WHERE username=%s AND deleted_at IS NULL',
+                               (username.strip().lower(),)).fetchone()
         valid = verify_password(password, row['password_hash'] if row else self._dummy_hash)
         if not row or not valid:
             raise AccessDenied('Неверный логин или пароль.')
@@ -118,9 +120,25 @@ class Database:
         user = self._sessions.get(token)
         if user is None:
             raise AccessDenied('Войдите в аккаунт.')
+        user = self._active_user(user)
+        self._sessions[token] = user
         if admin and not user.is_admin:
             raise AccessDenied('Это действие доступно только администратору.')
         return user
+
+    def _active_user(self, user: User) -> User:
+        # Tokens are local capabilities, but revocation must also apply to
+        # sessions and background recorders held by another app process.
+        with self.connect() as conn:
+            row = conn.execute('SELECT id,username,display_name,role FROM users '
+                               'WHERE id=%s AND deleted_at IS NULL', (user.id,)).fetchone()
+        if row is None:
+            raise AccessDenied('Аккаунт удалён. Войдите в другой аккаунт.')
+        return User(**row)
+
+    def _recording_user(self, token: str) -> User:
+        user = self._recorders.get(token)
+        return self._active_user(user) if user is not None else self.user(token)
 
     def logout(self, token: str) -> None:
         self._sessions.pop(token, None)
@@ -169,7 +187,7 @@ class Database:
         worker_ids = {value for workspace in document['workspaces']
                       for value in workspace.get('worker_ids', [])}
         inspectors = {row['id'] for row in conn.execute(
-            "SELECT id FROM users WHERE role='inspector' AND id=ANY(%s::bigint[])",
+            "SELECT id FROM users WHERE role='inspector' AND deleted_at IS NULL AND id=ANY(%s::bigint[])",
             (list(inspector_ids),)).fetchall()}
         workers = {row['id'] for row in conn.execute(
             'SELECT id FROM workers WHERE id=ANY(%s::integer[])', (list(worker_ids),)).fetchall()}
@@ -263,26 +281,82 @@ class Database:
         user = self.user(token)
         with self.connect() as conn:
             rows = conn.execute("SELECT id,username,display_name,role FROM users WHERE role='inspector' "
-                                'AND (%s OR id=%s) ORDER BY display_name,username',
+                                'AND deleted_at IS NULL AND (%s OR id=%s) ORDER BY display_name,username',
                                 (user.is_admin, user.id)).fetchall()
         return [User(**row) for row in rows]
 
     def create_inspector(self, token: str, username: str, display_name: str, password: str) -> User:
         self.user(token, admin=True)
-        username = username.strip().lower() if isinstance(username, str) else ''
-        if re.fullmatch(r'[a-z0-9_.-]{3,32}', username) is None:
-            raise ValueError('Логин: 3–32 латинских символа, цифры, точка, дефис или подчёркивание.')
-        display_name = self._person_name(display_name, 'имя инспектора', maximum=120)
-        if not isinstance(password, str) or not 5 <= len(password) <= 128 or not password.strip():
-            raise ValueError('Пароль должен содержать от 5 до 128 символов.')
+        username, display_name = self._inspector_identity(username, display_name)
+        encoded_password = self._inspector_password(password)
         try:
             with self.connect() as conn:
                 row = conn.execute("INSERT INTO users(username,display_name,role,password_hash) "
                                    "VALUES (%s,%s,'inspector',%s) RETURNING id,username,display_name,role",
-                                   (username, display_name, hash_password(password))).fetchone()
+                                   (username, display_name, encoded_password)).fetchone()
         except psycopg.errors.UniqueViolation:
             raise ValueError('Этот логин уже занят.') from None
         return User(**row)
+
+    def update_inspector(self, token: str, inspector_id: int, username: str,
+                         display_name: str, password: str | None = None) -> User:
+        self.user(token, admin=True)
+        inspector_id = self._inspector_id(inspector_id)
+        username, display_name = self._inspector_identity(username, display_name)
+        encoded_password = None if password is None or password == '' else self._inspector_password(password)
+        try:
+            with self.connect() as conn:
+                row = conn.execute('UPDATE users SET username=%s,display_name=%s,'
+                                   'password_hash=COALESCE(%s,password_hash) '
+                                   "WHERE id=%s AND role='inspector' AND deleted_at IS NULL "
+                                   'RETURNING id,username,display_name,role',
+                                   (username, display_name, encoded_password, inspector_id)).fetchone()
+                if row is None:
+                    raise ValueError('Инспектор не найден или уже удалён.')
+        except psycopg.errors.UniqueViolation:
+            raise ValueError('Этот логин уже занят.') from None
+        return User(**row)
+
+    def delete_inspector(self, token: str, inspector_id: int) -> None:
+        self.user(token, admin=True)
+        inspector_id = self._inspector_id(inspector_id)
+        with self.connect() as conn:
+            # Share the assignment lock with config saves and protected reads.
+            # Keep the user row for event reviewer attribution and old IDs.
+            document = self._config_row(conn, write=True)['document']
+            removed = conn.execute("UPDATE users SET deleted_at=now() WHERE id=%s "
+                                   "AND role='inspector' AND deleted_at IS NULL RETURNING id",
+                                   (inspector_id,)).fetchone()
+            if removed is None:
+                raise ValueError('Инспектор не найден или уже удалён.')
+            changed = False
+            for workspace in document['workspaces']:
+                if inspector_id in workspace.get('inspector_ids', []):
+                    workspace['inspector_ids'] = [value for value in workspace['inspector_ids']
+                                                  if value != inspector_id]
+                    changed = True
+            if changed:
+                conn.execute('UPDATE application_config SET document=%s,revision=revision+1,updated_at=now() '
+                             'WHERE id=1', (Jsonb(document),))
+
+    @staticmethod
+    def _inspector_id(value) -> int:
+        if type(value) is not int or not 1 <= value <= 9223372036854775807:
+            raise ValueError('Некорректный ID инспектора.')
+        return value
+
+    @classmethod
+    def _inspector_identity(cls, username: str, display_name: str) -> tuple[str, str]:
+        username = username.strip().lower() if isinstance(username, str) else ''
+        if re.fullmatch(r'[a-z0-9_.-]{3,32}', username) is None:
+            raise ValueError('Логин: 3–32 латинских символа, цифры, точка, дефис или подчёркивание.')
+        return username, cls._person_name(display_name, 'имя инспектора', maximum=120)
+
+    @staticmethod
+    def _inspector_password(password: str) -> str:
+        if not isinstance(password, str) or not 5 <= len(password) <= 128 or not password.strip():
+            raise ValueError('Пароль должен содержать от 5 до 128 символов.')
+        return hash_password(password)
 
     @staticmethod
     def _person_name(value, label, maximum=100) -> str:
@@ -398,7 +472,7 @@ class Database:
 
     def record_event(self, token: str, camera_id: str, camera_name: str, workspace_name: str,
                      count: int, snapshot: bytes, *, kind: str = 'no_helmet') -> int | None:
-        user = self._recorders.get(token) or self.user(token)
+        user = self._recording_user(token)
         if count <= 0 or not snapshot:
             raise ValueError('Для события нужны обнаружение и кадр.')
         if not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', kind):

@@ -268,6 +268,39 @@ class AccessDesktopTests(unittest.TestCase):
             self.pump(lambda: not workers._busy and 1000 not in root.store.get_workspace(zone.id).worker_ids)
             self.assertEqual(set(workers._rows), {1001})
 
+            root.show_section('Инспекторы')
+            inspectors = root._sections['Инспекторы']
+            self.pump(lambda: not inspectors._busy)
+            inspectors.table.selection_set(str(other.id))
+            inspectors.select_inspector()
+            inspectors.edit_inspector()
+            dialog = inspectors.dialog
+            dialog.display_name.delete(0, 'end')
+            dialog.display_name.insert(0, 'Обновлённый инспектор')
+            dialog.username.delete(0, 'end')
+            dialog.username.insert(0, 'updated_inspector')
+            dialog.password.insert(0, 'changed123')
+            dialog.submit()
+            self.pump(lambda: not dialog.winfo_exists() and not inspectors._busy)
+            updated_token = db.login('updated_inspector', 'changed123')
+            self.assertEqual(db.user(updated_token).id, other.id)
+            self.assertEqual(inspectors.table.set(str(other.id), 'name'), 'Обновлённый инспектор')
+            inspectors.table.selection_set(str(other.id))
+            inspectors.select_inspector()
+            with patch('safety_monitor.personnel_ui.messagebox.askyesno', return_value=True):
+                inspectors.delete_inspector()
+            self.pump(lambda: not inspectors._busy and all(
+                other.id not in item.inspector_ids for item in root.store.workspaces))
+            self.assertNotIn(str(other.id), inspectors.table.get_children())
+            self.assertEqual(len(root.store.workspaces), 2)
+            self.assertEqual(sum(len(item.cameras) for item in root.store.workspaces), 2)
+            self.assertEqual(root.store.get_workspace(hidden.id).worker_ids, [1001])
+            self.assertEqual(len(db.list_events(root.token)), 2)
+            with self.assertRaises(ValueError):
+                db.login('updated_inspector', 'changed123')
+            with self.assertRaises(ValueError):
+                db.load_config(updated_token)
+
 
 if __name__ == '__main__':
     unittest.main()
